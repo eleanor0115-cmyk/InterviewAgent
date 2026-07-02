@@ -1,5 +1,6 @@
 import cors from "cors";
 import express from "express";
+import multer from "multer";
 import { nanoid } from "nanoid";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -7,15 +8,17 @@ import { fileURLToPath } from "node:url";
 import type { InterviewSession } from "../../src/shared/types.js";
 import { evaluateAnswer } from "./evaluationAgent.js";
 import { analyzeExperience } from "./experienceAnalyzer.js";
-import { optimizeThirtySecondAnswer } from "./expressionAgent.js";
+import { optimizeAnswerExpression } from "./expressionAgent.js";
 import { generateFollowUps } from "./followUpAgent.js";
 import { createKnowledgeTree } from "./knowledgeTreeAgent.js";
 import { getLlmRuntimeInfo, updateLlmRuntimeConfig } from "./llmClient.js";
 import { getMemoryProfile, updateMemoryProfile } from "./memoryStore.js";
 import { createInterviewPlan } from "./planner.js";
 import { analyzeProfileWithAgent } from "./profileAgent.js";
+import { getRagStats, retrieveRagContext, upsertTrainingMemoryDocument } from "./ragStore.js";
 import { reflectInterviewResult } from "./reflectionAgent.js";
 import { createReport } from "./reportAgent.js";
+import { parseResumeFile } from "./resumeParser.js";
 import {
   createSessionSchema,
   evaluationSchema,
@@ -35,6 +38,12 @@ import { getSession, listSessions, saveSession } from "./storage.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 6 * 1024 * 1024
+  }
+});
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const clientDistDir = path.resolve(__dirname, "../../client");
@@ -45,7 +54,7 @@ app.use(express.json({ limit: "2mb" }));
 
 app.get("/api/health", async (_request, response, next) => {
   try {
-    response.json({ ok: true, service: "InterviewAgent Pro API", llm: await getLlmRuntimeInfo() });
+    response.json({ ok: true, service: "InterviewAgent Pro API", llm: await getLlmRuntimeInfo(), rag: await getRagStats() });
   } catch (error) {
     next(error);
   }
@@ -63,6 +72,25 @@ app.put("/api/config/model", async (request, response, next) => {
   try {
     const input = modelConfigUpdateSchema.parse(request.body);
     response.json(await updateLlmRuntimeConfig(input));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/resume/parse", upload.single("file"), async (request, response, next) => {
+  try {
+    if (!request.file) {
+      response.status(400).json({ message: "请上传简历文件" });
+      return;
+    }
+
+    response.json(
+      await parseResumeFile({
+        fileName: request.file.originalname,
+        mimetype: request.file.mimetype,
+        buffer: request.file.buffer
+      })
+    );
   } catch (error) {
     next(error);
   }
@@ -134,7 +162,7 @@ app.post("/api/analyze/profile", async (request, response, next) => {
 app.post("/api/analyze/experience", async (request, response, next) => {
   try {
     const input = experienceAnalyzeSchema.parse(request.body);
-    const analysis = analyzeExperience(input);
+    const analysis = await analyzeExperience(input);
 
     if (input.sessionId) {
       const session = await getSession(input.sessionId);
@@ -147,7 +175,7 @@ app.post("/api/analyze/experience", async (request, response, next) => {
       }
     }
 
-    response.json({ analysis, source: "heuristic" });
+    response.json({ analysis, source: "llm" });
   } catch (error) {
     next(error);
   }
@@ -163,7 +191,14 @@ app.post("/api/planner", async (request, response, next) => {
       return;
     }
 
-    const result = createInterviewPlan(session);
+    const memory = await getMemoryProfile();
+    const ragContext = await retrieveRagContext({
+      session,
+      memory,
+      kinds: ["interview_experience", "training_memory"],
+      topK: 8
+    });
+    const result = await createInterviewPlan(session, ragContext);
     await saveSession({
       ...session,
       interviewPlan: result.plan,
@@ -171,7 +206,7 @@ app.post("/api/planner", async (request, response, next) => {
       updatedAt: new Date().toISOString()
     });
 
-    response.json({ ...result, source: "heuristic" });
+    response.json({ ...result, source: "llm" });
   } catch (error) {
     next(error);
   }
@@ -180,7 +215,7 @@ app.post("/api/planner", async (request, response, next) => {
 app.post("/api/interview/follow-up", async (request, response, next) => {
   try {
     const input = followUpSchema.parse(request.body);
-    response.json(generateFollowUps(input));
+    response.json(await generateFollowUps(input));
   } catch (error) {
     next(error);
   }
@@ -189,7 +224,7 @@ app.post("/api/interview/follow-up", async (request, response, next) => {
 app.post("/api/interview/evaluate", async (request, response, next) => {
   try {
     const input = evaluationSchema.parse(request.body);
-    const evaluation = evaluateAnswer(input);
+    const evaluation = await evaluateAnswer(input);
     const memory = await updateMemoryProfile({
       question: input.question,
       tags: input.tags,
@@ -205,7 +240,7 @@ app.post("/api/interview/evaluate", async (request, response, next) => {
 app.post("/api/interview/expression/optimize", async (request, response, next) => {
   try {
     const input = expressionOptimizeSchema.parse(request.body);
-    response.json(optimizeThirtySecondAnswer(input));
+    response.json(await optimizeAnswerExpression(input));
   } catch (error) {
     next(error);
   }
@@ -214,7 +249,7 @@ app.post("/api/interview/expression/optimize", async (request, response, next) =
 app.post("/api/interview/reflect", async (request, response, next) => {
   try {
     const input = reflectionSchema.parse(request.body);
-    response.json(reflectInterviewResult(input));
+    response.json(await reflectInterviewResult(input));
   } catch (error) {
     next(error);
   }
@@ -243,6 +278,7 @@ app.post("/api/interview/practice-records", async (request, response, next) => {
       practiceRecords: [record, ...(session.practiceRecords ?? [])].slice(0, 50),
       updatedAt: new Date().toISOString()
     });
+    await upsertTrainingMemoryDocument(updatedSession, record);
 
     response.status(201).json({ record, session: updatedSession });
   } catch (error) {
@@ -260,7 +296,7 @@ app.post("/api/knowledge/tree", async (request, response, next) => {
       return;
     }
 
-    response.json(createKnowledgeTree(session));
+    response.json(await createKnowledgeTree(session));
   } catch (error) {
     next(error);
   }
@@ -277,7 +313,7 @@ app.post("/api/interview/report", async (request, response, next) => {
     }
 
     const memory = await getMemoryProfile();
-    const report = createReport(session, memory);
+    const report = await createReport(session, memory);
     const updatedSession = await saveSession({
       ...session,
       report,
@@ -300,38 +336,14 @@ app.put("/api/experience/questions", async (request, response, next) => {
       return;
     }
 
-    const hotTagMap = new Map<string, number>();
-    for (const question of input.questions) {
-      for (const tag of question.tags) {
-        hotTagMap.set(tag, (hotTagMap.get(tag) ?? 0) + question.frequency);
-      }
+    if (!session.experienceAnalysis) {
+      response.status(409).json({ message: "请先使用模型解析面经后再编辑题目" });
+      return;
     }
 
     const updatedExperience = {
-      ...(session.experienceAnalysis ?? {
-        companyStyle: {
-          projectDepth: "medium" as const,
-          basicKnowledge: "medium" as const,
-          pressureLevel: "medium" as const,
-          commonPatterns: []
-        }
-      }),
-      questions: input.questions,
-      hotTags: [...hotTagMap.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 12)
-        .map(([name, count]) => ({ name, count })),
-      summary: {
-        questionCount: input.questions.length,
-        hardestTags: input.questions
-          .filter((question) => question.difficulty === "hard")
-          .flatMap((question) => question.tags)
-          .slice(0, 6),
-        recommendedFocus: [...hotTagMap.entries()]
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 6)
-          .map(([name]) => name)
-      }
+      ...session.experienceAnalysis,
+      questions: input.questions
     };
 
     const updatedSession = await saveSession({

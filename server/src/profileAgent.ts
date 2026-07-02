@@ -1,5 +1,6 @@
 import type { ProfileAnalysis } from "../../src/shared/types.js";
-import { extractJsonObject, createJsonChatCompletion, hasLlmConfig } from "./llmClient.js";
+import { profileAgentSchema } from "./agentSchemas.js";
+import { extractJsonObject, createStructuredChatCompletion, hasLlmConfig } from "./llmClient.js";
 import { profileAnalysisSchema } from "./schemas.js";
 
 type ProfileAgentInput = {
@@ -20,7 +21,7 @@ const systemPrompt = [
   "summary.preparationPriority 必须输出 3-4 个短标签，不要写完整句；每项 4-10 个中文字符，例如：项目深挖、技术权衡、量化结果、AI 边界、反问准备、基础巩固。",
   "如果 JD、岗位名称、简历或面经出现 AI、大模型、LLM、Agent、Prompt、RAG、Copilot、Cursor 等信号，必须把 AI 开放题纳入准备重点：AI 的优点和局限、对 AI 的看法、如何约束 AI 输出、如何避免幻觉/隐私泄露/不可验证内容、大家都用 AI 时候选人的差异化优势。",
   "AI 开放题不要写成概念背诵或价值观口号，必须要求候选人结合真实项目或工具使用过程，说明问题定义、任务拆解、哪些环节适合交给 AI、哪些必须由人判断、验证标准、风险边界和最终可交付结果。",
-  "反问建议不要模板化，要基于业务目标、用户分层、场景频次、团队当前问题、岗位贡献和指标权衡，并引导候选人在面试官回答后做一句自己的理解承接。",
+  "反问建议不要模板化，要基于岗位域自适应：技术岗围绕技术难题、系统边界、工程质量、协作方式和业务目标如何影响技术取舍；运营/产品/商业岗可以围绕用户/客户场景、指标权衡、团队当前问题和岗位贡献，并引导候选人在面试官回答后做一句自己的理解承接。",
   "输出不要像背 AI 答案；保持具体、克制、可追问，避免空泛词。",
   "必须只输出一个 JSON 对象，不要 Markdown，不要解释。",
   "评分要稳定，weight 取 0 到 1，小数最多两位，jobKeywords 的 weight 总和尽量接近 1。",
@@ -70,38 +71,10 @@ function buildUserPrompt(input: ProfileAgentInput) {
   );
 }
 
-const priorityLabelRules: Array<[RegExp, string]> = [
-  [/AI|大模型|LLM|Agent|Prompt|RAG|幻觉|模型|约束/i, "AI 边界"],
-  [/项目|经历|深挖|技术难点|真实性/, "项目深挖"],
-  [/权衡|取舍|方案|为什么|设计|替代/, "技术权衡"],
-  [/量化|指标|数据|结果|效果|收益/, "量化结果"],
-  [/自我介绍|STAR|表达|钩子|回答/, "表达结构"],
-  [/反问|业务目标|用户分层|团队问题/, "反问准备"],
-  [/八股|基础|原理|浏览器|手写|算法|力扣/, "基础巩固"],
-  [/协作|沟通|跨部门|推进/, "协作案例"],
-  [/业务|商业|行业|公司|竞品|用户|增长/, "业务理解"],
-  [/性能|优化|首屏|渲染/, "性能优化"],
-  [/安全|隐私|权限|XSS|CSRF|风控/, "安全边界"],
-  [/系统|架构|并发|稳定|扩展/, "架构设计"]
-];
-
-function compactPriorityLabel(item: string) {
-  const normalized = item.replace(/\s+/g, " ").trim();
-  const matched = priorityLabelRules.find(([pattern]) => pattern.test(normalized));
-  if (matched) return matched[1];
-
-  const firstPhrase = normalized
-    .split(/[，,。；;：:、]/)[0]
-    .replace(/^(优先|重点|建议|需要|准备|补充|强化|完善|梳理)/, "")
-    .trim();
-
-  return firstPhrase.length > 10 ? firstPhrase.slice(0, 10) : firstPhrase;
-}
-
 function normalizeProfileAnalysis(analysis: ProfileAnalysis): ProfileAnalysis {
   const seen = new Set<string>();
   const priority = analysis.summary.preparationPriority
-    .map(compactPriorityLabel)
+    .map((item) => item.replace(/\s+/g, " ").trim())
     .filter((item) => {
       if (!item || seen.has(item)) return false;
       seen.add(item);
@@ -109,11 +82,15 @@ function normalizeProfileAnalysis(analysis: ProfileAnalysis): ProfileAnalysis {
     })
     .slice(0, 4);
 
+  if (priority.length === 0) {
+    throw new Error("Profile Analyzer 模型响应缺少 preparationPriority");
+  }
+
   return {
     ...analysis,
     summary: {
       ...analysis.summary,
-      preparationPriority: priority.length > 0 ? priority : analysis.gaps.slice(0, 4).map((gap) => gap.name)
+      preparationPriority: priority
     }
   };
 }
@@ -126,10 +103,13 @@ export async function analyzeProfileWithAgent(input: ProfileAgentInput): Promise
     throw new Error("未配置 OPENAI_API_KEY，请检查后端环境变量。");
   }
 
-  const raw = await createJsonChatCompletion([
+  const raw = await createStructuredChatCompletion(
+    [
     { role: "system", content: systemPrompt },
     { role: "user", content: buildUserPrompt(input) }
-  ]);
+    ],
+    profileAgentSchema
+  );
   const parsed = extractJsonObject(raw);
   const analysis = normalizeProfileAnalysis(profileAnalysisSchema.parse(parsed));
 

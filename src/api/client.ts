@@ -14,6 +14,7 @@ import type {
   MemoryProfile,
   ModelConfigInfo,
   ModelConfigUpdate,
+  ParsedResume,
   ProfileAnalysis,
   ReflectionResult
 } from "../shared/types";
@@ -26,14 +27,14 @@ type ProfileAgentResponse = {
 
 type ExperienceAgentResponse = {
   analysis: ExperienceAnalysis;
-  source: "llm" | "heuristic";
+  source: "llm";
   warning?: string;
 };
 
 type PlannerResponse = {
   plan: InterviewPlan;
   questions: InterviewQuestion[];
-  source: "llm" | "heuristic";
+  source: "llm";
   warning?: string;
 };
 
@@ -190,6 +191,23 @@ export function updateModelConfig(input: ModelConfigUpdate) {
     method: "PUT",
     body: JSON.stringify(input)
   });
+}
+
+export async function parseResumeFile(file: File) {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const response = await fetch("/api/resume/parse", {
+    method: "POST",
+    body: formData
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.message ?? "简历解析失败");
+  }
+
+  return response.json() as Promise<ParsedResume>;
 }
 
 export function getMemory() {

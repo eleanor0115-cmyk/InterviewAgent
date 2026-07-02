@@ -11,15 +11,6 @@ const questionTypeSchema = z.enum([
   "reverse_question"
 ]);
 
-const legacyInterviewTypeSchema = z.enum([
-  "technical_basic",
-  "project_deep_dive",
-  "system_design",
-  "ai_application",
-  "behavior",
-  "pressure"
-]);
-
 const jobDomainSchema = z.enum([
   "frontend",
   "backend",
@@ -40,17 +31,14 @@ export const createSessionSchema = z.object({
   experienceText: z.string().trim().optional().default(""),
   questionTypes: z.array(questionTypeSchema).optional(),
   jobDomains: z.array(jobDomainSchema).optional(),
-  interviewTypes: z.array(legacyInterviewTypeSchema).optional()
+  interviewTypes: z.array(z.string()).optional()
 }).transform((input) => {
   const { interviewTypes: _legacyInterviewTypes, ...rest } = input;
 
   return {
     ...rest,
-    questionTypes:
-      input.questionTypes && input.questionTypes.length > 0
-        ? input.questionTypes
-        : mapLegacyQuestionTypes(input.interviewTypes ?? []),
-    jobDomains: input.jobDomains && input.jobDomains.length > 0 ? input.jobDomains : inferDefaultDomains(input.jobTitle, input.jdText)
+    questionTypes: input.questionTypes ?? ([] as QuestionType[]),
+    jobDomains: input.jobDomains && input.jobDomains.length > 0 ? input.jobDomains : (["general"] as JobDomain[])
   };
 });
 
@@ -182,34 +170,6 @@ export const experienceQuestionUpdateSchema = z.object({
 });
 
 const riskLevelSchema = z.enum(["low", "medium", "high"]);
-
-function mapLegacyQuestionTypes(types: z.infer<typeof legacyInterviewTypeSchema>[]) {
-  const mapped = types.map((type) => {
-    const map: Record<z.infer<typeof legacyInterviewTypeSchema>, z.infer<typeof questionTypeSchema>> = {
-      technical_basic: "method_ability",
-      project_deep_dive: "experience_validation",
-      system_design: "scenario_practice",
-      ai_application: "scenario_practice",
-      behavior: "collaboration",
-      pressure: "pressure_challenge"
-    };
-    return map[type];
-  });
-
-  return (mapped.length > 0 ? [...new Set(mapped)] : ["business_understanding", "experience_validation", "method_ability"]) as QuestionType[];
-}
-
-function inferDefaultDomains(jobTitle: string, jdText: string) {
-  const text = `${jobTitle} ${jdText}`.toLowerCase();
-  if (/(前端|frontend|react|vue)/i.test(text)) return ["frontend"] as JobDomain[];
-  if (/(后端|backend|node|java|go|服务端)/i.test(text)) return ["backend"] as JobDomain[];
-  if (/(ai|agent|llm|大模型|算法)/i.test(text)) return ["ai_engineering"] as JobDomain[];
-  if (/(产品|prd|需求|用户体验)/i.test(text)) return ["product"] as JobDomain[];
-  if (/(运营|增长|用户分层|活动|留存|转化)/i.test(text)) return ["operations"] as JobDomain[];
-  if (/(数据|sql|分析|实验|指标)/i.test(text)) return ["data_analysis"] as JobDomain[];
-  if (/(市场|投放|品牌|渠道)/i.test(text)) return ["marketing"] as JobDomain[];
-  return ["general"] as JobDomain[];
-}
 
 export const profileAnalysisSchema = z.object({
   jobKeywords: z.array(

@@ -1,19 +1,11 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Alert, Button, Checkbox, Form, Input, Space, Typography, message } from "antd";
-import { ClearOutlined, DeleteOutlined, DownloadOutlined, RocketOutlined, SaveOutlined } from "@ant-design/icons";
-import type { CreateSessionInput, JobDomain, QuestionType } from "../shared/types";
-import { analyzeExperience, analyzeProfile, createPlan, createSession } from "../api/client";
+import { Alert, Button, Checkbox, Form, Input, Space, Tag, Typography, Upload, message } from "antd";
+import type { UploadProps } from "antd";
+import { ClearOutlined, DeleteOutlined, DownloadOutlined, FileTextOutlined, RocketOutlined, SaveOutlined } from "@ant-design/icons";
+import type { CreateSessionInput, JobDomain, ParsedResume } from "../shared/types";
+import { analyzeExperience, analyzeProfile, createPlan, createSession, parseResumeFile } from "../api/client";
 import { useSessionStore } from "../store/sessionStore";
-
-const defaultQuestionTypes: QuestionType[] = [
-  "business_understanding",
-  "experience_validation",
-  "method_ability",
-  "scenario_practice",
-  "collaboration",
-  "pressure_challenge"
-];
 
 const jobDomainOptions: { label: string; value: JobDomain }[] = [
   { label: "前端", value: "frontend" },
@@ -33,8 +25,8 @@ const initialValues: CreateSessionInput = {
   jdText: "",
   resumeText: "",
   experienceText: "",
-  questionTypes: defaultQuestionTypes,
-  jobDomains: ["frontend"]
+  questionTypes: [],
+  jobDomains: []
 };
 
 const resumeCacheKey = "interview-agent.resumeText";
@@ -82,7 +74,9 @@ function clearInputDraft() {
 export function InputPage() {
   const [form] = Form.useForm<CreateSessionInput>();
   const [submitting, setSubmitting] = useState(false);
+  const [resumeParsing, setResumeParsing] = useState(false);
   const [hasResumeCache, setHasResumeCache] = useState(false);
+  const [parsedResume, setParsedResume] = useState<ParsedResume>();
   const navigate = useNavigate();
   const currentSession = useSessionStore((state) => state.currentSession);
   const setCurrentSession = useSessionStore((state) => state.setCurrentSession);
@@ -157,6 +151,27 @@ export function InputPage() {
     message.success("已清空简历缓存");
   };
 
+  const handleResumeUpload: UploadProps["beforeUpload"] = async (file) => {
+    setResumeParsing(true);
+    try {
+      const parsed = await parseResumeFile(file);
+      const resumeText = parsed.formattedText || parsed.rawText;
+
+      form.setFieldValue("resumeText", resumeText);
+      writeResumeCache(resumeText);
+      writeInputDraft({ ...form.getFieldsValue(), resumeText });
+      setHasResumeCache(true);
+      setParsedResume(parsed);
+      message.success(`已解析 ${parsed.fileName}`);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "简历解析失败");
+    } finally {
+      setResumeParsing(false);
+    }
+
+    return Upload.LIST_IGNORE;
+  };
+
   const handleClearDraft = () => {
     writeInputDraft(initialValues);
     form.setFieldsValue(initialValues);
@@ -169,7 +184,7 @@ export function InputPage() {
     try {
       const payload: CreateSessionInput = {
         ...values,
-        questionTypes: values.questionTypes?.length ? values.questionTypes : defaultQuestionTypes
+        questionTypes: values.questionTypes ?? []
       };
 
       writeResumeCache(payload.resumeText);
@@ -215,7 +230,7 @@ export function InputPage() {
       <div className="page-intro">
         <Typography.Title level={1}>资料输入</Typography.Title>
         <Typography.Paragraph>
-          输入目标公司、岗位 JD、简历和面经，系统会先创建本地 session，并完成第一轮岗位画像分析。
+          输入目标公司、岗位 JD、简历和搜集面经，生成一份可训练的面试准备方案。
         </Typography.Paragraph>
         <Alert
           type="info"
@@ -284,6 +299,16 @@ export function InputPage() {
                 >
                   清空
                 </Button>
+                <Upload
+                  accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown"
+                  maxCount={1}
+                  showUploadList={false}
+                  beforeUpload={handleResumeUpload}
+                >
+                  <Button htmlType="button" type="link" size="small" icon={<FileTextOutlined />} loading={resumeParsing}>
+                    上传解析
+                  </Button>
+                </Upload>
               </Space>
             </div>
           }
@@ -292,8 +317,27 @@ export function InputPage() {
           <Input.TextArea rows={7} placeholder="粘贴项目经历、技能栈、实习经历、成果指标..." />
         </Form.Item>
 
+        {parsedResume && (
+          <div className="parsed-resume-summary">
+            <div className="parsed-resume-title">
+              <strong>解析结果</strong>
+              <span>{parsedResume.fileName}</span>
+            </div>
+            <div className="evidence-list">
+              {parsedResume.fields.name && <Tag color="blue">姓名：{parsedResume.fields.name}</Tag>}
+              {parsedResume.fields.email && <Tag color="cyan">邮箱：{parsedResume.fields.email}</Tag>}
+              {parsedResume.fields.phone && <Tag color="cyan">手机：{parsedResume.fields.phone}</Tag>}
+              {parsedResume.fields.education.length > 0 && <Tag>教育 {parsedResume.fields.education.length}</Tag>}
+              {parsedResume.fields.skills.length > 0 && <Tag>技能 {parsedResume.fields.skills.length}</Tag>}
+              {parsedResume.fields.projects.length > 0 && <Tag>项目 {parsedResume.fields.projects.length}</Tag>}
+              {parsedResume.fields.internships.length > 0 && <Tag>实习 {parsedResume.fields.internships.length}</Tag>}
+              {parsedResume.fields.workExperience.length > 0 && <Tag>工作 {parsedResume.fields.workExperience.length}</Tag>}
+            </div>
+          </div>
+        )}
+
         <Form.Item name="experienceText" label="面经材料">
-          <Input.TextArea rows={7} placeholder="粘贴目标公司或同类岗位面经，第二阶段会用于高频题抽取..." />
+          <Input.TextArea rows={7} placeholder="粘贴目标公司或同类岗位面经，模型会提取高频问题和准备重点..." />
         </Form.Item>
 
         <Space className="form-actions">

@@ -1,62 +1,89 @@
 import type { InterviewSession, KnowledgeTree } from "../../src/shared/types.js";
+import { asArray, asRecord, asString, asStringArray, unwrapPayload } from "./agentValidation.js";
+import { knowledgeTreeAgentSchema } from "./agentSchemas.js";
+import { createStructuredChatCompletion, extractJsonObject } from "./llmClient.js";
 
-function nodeId(index: number) {
-  return `N${index}`;
-}
+const systemPrompt = [
+  "你是 InterviewAgent 的 Knowledge Tree Agent，负责把本次面试准备材料生成知识图谱。",
+  "图谱必须基于 JD、简历、搜集面经、准备方案和训练记录，不要用固定节点模板。",
+  "节点要体现真实准备逻辑：岗位要求、面经高频、简历证据、风险短板、训练重点、AI 开放题或项目深挖等。",
+  "mermaid 必须是可渲染的 graph TD 源码，节点 id 使用字母数字下划线，节点文案放在双引号里。",
+  "nodes 和 edges 要与 mermaid 对应，方便前端渲染和说明。",
+  "输出必须是 JSON object，不要 Markdown，不要解释。"
+].join("\n");
 
-function sanitizeLabel(label: string) {
-  return label.replace(/["<>]/g, "").slice(0, 28);
-}
-
-export function createKnowledgeTree(session: InterviewSession): KnowledgeTree {
-  const nodes: KnowledgeTree["nodes"] = [
+function buildUserPrompt(session: InterviewSession) {
+  return JSON.stringify(
     {
-      id: "ROOT",
-      label: `${session.company} ${session.jobTitle}`,
-      level: 0,
-      tags: ["面试目标"]
-    }
-  ];
-  const edges: KnowledgeTree["edges"] = [];
-  let index = 1;
+      outputSchema: {
+        mermaid: "graph TD\\n  ROOT[\"...\"]\\n  ROOT --> A",
+        nodes: [{ id: "string", label: "string", level: "number", tags: ["string"] }],
+        edges: [{ from: "string", to: "string", reason: "string" }]
+      },
+      constraints: {
+        maxNodes: 18,
+        maxEdges: 24,
+        rootShouldRepresent: `${session.company} ${session.jobTitle}`
+      },
+      session: {
+        company: session.company,
+        jobTitle: session.jobTitle,
+        jobDomains: session.jobDomains,
+        profileAnalysis: session.profileAnalysis,
+        experienceAnalysis: session.experienceAnalysis,
+        interviewPlan: session.interviewPlan,
+        initialQuestions: session.initialQuestions?.slice(0, 10),
+        practiceRecords: session.practiceRecords?.slice(0, 8)
+      }
+    },
+    null,
+    2
+  );
+}
 
-  function addChild(parent: string, label: string, level: number, tags: string[], reason: string) {
-    const id = nodeId(index);
-    index += 1;
-    nodes.push({ id, label, level, tags });
-    edges.push({ from: parent, to: id, reason });
-    return id;
+function normalizeTree(value: unknown): KnowledgeTree {
+  const payload = unwrapPayload(value, ["tree", "result", "data"], "knowledgeTreeResponse");
+  const nodes = asArray(payload.nodes, "knowledgeTreeResponse.nodes")
+    .map((item) => {
+      const node = asRecord(item, "knowledgeTreeResponse.nodes[]");
+      return {
+        id: asString(node.id, "knowledgeTreeResponse.nodes[].id"),
+        label: asString(node.label, "knowledgeTreeResponse.nodes[].label"),
+        level: typeof node.level === "number" ? node.level : Number(node.level ?? 0),
+        tags: asStringArray(node.tags, "knowledgeTreeResponse.nodes[].tags", 6)
+      };
+    })
+    .slice(0, 24);
+  const edges = asArray(payload.edges, "knowledgeTreeResponse.edges")
+    .map((item) => {
+      const edge = asRecord(item, "knowledgeTreeResponse.edges[]");
+      return {
+        from: asString(edge.from, "knowledgeTreeResponse.edges[].from"),
+        to: asString(edge.to, "knowledgeTreeResponse.edges[].to"),
+        reason: asString(edge.reason, "knowledgeTreeResponse.edges[].reason")
+      };
+    })
+    .slice(0, 32);
+
+  if (!asString(payload.mermaid, "knowledgeTreeResponse.mermaid").startsWith("graph TD")) {
+    throw new Error("Knowledge Tree 模型响应不是 graph TD Mermaid 源码");
   }
-
-  const jdRoot = addChild("ROOT", "JD 考纲", 1, ["JD"], "岗位要求决定考纲范围");
-  for (const keyword of session.profileAnalysis?.jobKeywords.slice(0, 6) ?? []) {
-    addChild(jdRoot, keyword.name, 2, ["JD 关键词"], keyword.reason);
-  }
-
-  const interviewRoot = addChild("ROOT", "搜集面经", 1, ["面经"], "用户搜集面经决定高频优先级");
-  for (const tag of session.experienceAnalysis?.hotTags.slice(0, 6) ?? []) {
-    addChild(interviewRoot, tag.name, 2, ["高频标签"], `出现 ${tag.count} 次`);
-  }
-
-  const gapRoot = addChild("ROOT", "简历短板", 1, ["Gap"], "简历短板决定追问深度");
-  for (const gap of session.profileAnalysis?.gaps.slice(0, 5) ?? []) {
-    addChild(gapRoot, gap.name, 2, [gap.risk], gap.suggestion);
-  }
-
-  const planRoot = addChild("ROOT", "训练重点", 1, ["Planner"], "Planner 输出下一轮训练重点");
-  for (const focus of session.interviewPlan?.focusAreas.slice(0, 5) ?? []) {
-    addChild(planRoot, focus.name, 2, ["重点分配"], focus.reason);
-  }
-
-  const mermaidLines = [
-    "graph TD",
-    ...nodes.map((node) => `  ${node.id}[\"${sanitizeLabel(node.label)}\"]`),
-    ...edges.map((edge) => `  ${edge.from} --> ${edge.to}`)
-  ];
 
   return {
-    mermaid: mermaidLines.join("\n"),
+    mermaid: asString(payload.mermaid, "knowledgeTreeResponse.mermaid"),
     nodes,
     edges
   };
+}
+
+export async function createKnowledgeTree(session: InterviewSession): Promise<KnowledgeTree> {
+  const raw = await createStructuredChatCompletion(
+    [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: buildUserPrompt(session) }
+    ],
+    knowledgeTreeAgentSchema
+  );
+
+  return normalizeTree(extractJsonObject(raw));
 }

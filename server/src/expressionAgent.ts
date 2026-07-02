@@ -1,69 +1,73 @@
 import type { ExpressionOptimization } from "../../src/shared/types.js";
+import { asNumber, asRecord, asString, asStringArray, unwrapPayload } from "./agentValidation.js";
+import { expressionAgentSchema } from "./agentSchemas.js";
+import { createStructuredChatCompletion, extractJsonObject } from "./llmClient.js";
 
-function clampScore(score: number) {
-  return Math.max(0, Math.min(100, Math.round(score)));
-}
-
-function hasAny(text: string, signals: string[]) {
-  return signals.some((signal) => text.includes(signal));
-}
-
-function firstSentence(text: string) {
-  return text
-    .split(/[。！？!?]/)
-    .map((item) => item.replace(/^[，,、；;\s]+/, "").trim())
-    .find(Boolean) ?? text.trim();
-}
-
-function compact(text: string, maxLength: number) {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
-}
-
-export function optimizeThirtySecondAnswer(input: {
+type ExpressionInput = {
   answer: string;
   question?: string;
   expectedPoints?: string[];
-}): ExpressionOptimization {
-  const answer = input.answer.trim();
-  const conclusion = /我|核心|重点|结论|认为/.test(answer)
-    ? firstSentence(answer)
-    : `我的核心结论是：${compact(firstSentence(answer), 42)}`;
-  const background = hasAny(answer, ["背景", "场景", "项目", "业务", "用户"])
-    ? compact((answer.match(/[^。！？!?]*(背景|场景|项目|业务|用户)[^。！？!?]*/)?.[0] ?? answer).replace(/^[，,、；;\s]+/, ""), 58)
-    : "这个回答需要先补一句具体项目背景和约束。";
-  const action = hasAny(answer, ["方案", "设计", "实现", "拆解", "权衡", "验证"])
-    ? compact((answer.match(/[^。！？!?]*(方案|设计|实现|拆解|权衡|验证)[^。！？!?]*/)?.[0] ?? answer).replace(/^[，,、；;\s]+/, ""), 72)
-    : "我会补充自己的关键动作：怎么拆问题、为什么这么选、怎么验证。";
-  const result = hasAny(answer, ["结果", "提升", "降低", "%", "上线", "指标", "效率"])
-    ? compact((answer.match(/[^。！？!?]*(结果|提升|降低|%|上线|指标|效率)[^。！？!?]*/)?.[0] ?? answer).replace(/^[，,、；;\s]+/, ""), 58)
-    : "最后需要用指标、对比或验收标准收口。";
-  const optimized = [conclusion, background, action, result].join("");
-  const structureScore = clampScore(
-    35 +
-      (conclusion ? 12 : 0) +
-      (background.includes("需要") ? 0 : 14) +
-      (action.includes("补充") ? 0 : 18) +
-      (result.includes("需要") ? 0 : 18) +
-      Math.min(answer.length / 18, 8)
+};
+
+const systemPrompt = [
+  "你是 InterviewAgent 的 Answer Optimization Agent，负责把候选人的回答优化成更扣题、更完整、更适合面试现场表达的版本。",
+  "不要强制缩短回答，也不要追求 30 秒；如果原回答缺少关键要点，应适当补充结构、逻辑和表达承接。",
+  "不要套模板，不要编造候选人没有提到的项目结果。",
+  "优化目标：回答到题目要点上，先给结论，再交代背景/问题，再讲关键动作、方案权衡、个人贡献，最后用结果、验证标准或复盘收口。",
+  "必须参考 question 和 expectedPoints，找出原回答没有覆盖或表达不清的部分，并把可优化建议直接落实到 optimized 里。",
+  "如果原回答缺少事实或数据，只能提示需要补充，不能替候选人编数据。",
+  "suggestions 输出 3-6 条可直接用于优化表达的具体修改建议，避免空泛建议。",
+  "输出必须是 JSON object，不要 Markdown，不要解释。"
+].join("\n");
+
+function buildUserPrompt(input: ExpressionInput) {
+  return JSON.stringify(
+    {
+      outputSchema: {
+        original: "string",
+        optimized: "string",
+        structureScore: "number 0-100",
+        structure: {
+          conclusion: "string",
+          background: "string",
+          action: "string",
+          result: "string"
+        },
+        suggestions: ["已经落实到 optimized 或需要候选人补充事实的表达建议"]
+      },
+      input
+    },
+    null,
+    2
   );
-  const suggestions = [
-    !background.includes("需要") ? "" : "补一句真实背景和约束，避免直接进入技术名词。",
-    !action.includes("补充") ? "" : "把“我用了什么”改成“我为什么这样设计”。",
-    !result.includes("需要") ? "" : "补结果指标、上线效果或可验收证据。",
-    optimized.length > 180 ? "30 秒版本仍偏长，可以再删掉过程细节，只保留结论、动作和结果。" : ""
-  ].filter(Boolean);
+}
+
+function normalizeExpression(value: unknown): ExpressionOptimization {
+  const payload = unwrapPayload(value, ["optimization", "result", "data"], "expressionResponse");
+  const structure = asRecord(payload.structure, "expressionResponse.structure");
 
   return {
-    original: answer,
-    optimized,
-    structureScore,
+    original: asString(payload.original, "expressionResponse.original"),
+    optimized: asString(payload.optimized, "expressionResponse.optimized"),
+    structureScore: asNumber(payload.structureScore, "expressionResponse.structureScore", 0, 100),
     structure: {
-      conclusion,
-      background,
-      action,
-      result
+      conclusion: asString(structure.conclusion, "expressionResponse.structure.conclusion"),
+      background: asString(structure.background, "expressionResponse.structure.background"),
+      action: asString(structure.action, "expressionResponse.structure.action"),
+      result: asString(structure.result, "expressionResponse.structure.result")
     },
-    suggestions
+    suggestions: asStringArray(payload.suggestions, "expressionResponse.suggestions", 8)
   };
+}
+
+export async function optimizeAnswerExpression(input: ExpressionInput): Promise<ExpressionOptimization> {
+  const raw = await createStructuredChatCompletion(
+    [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: buildUserPrompt(input) }
+    ],
+    expressionAgentSchema
+  );
+
+  return normalizeExpression(extractJsonObject(raw));
 }

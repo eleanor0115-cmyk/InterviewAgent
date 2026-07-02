@@ -113,7 +113,7 @@ export function TrainingPanel({ sessionId, questions, domainLabel, onSessionUpda
   const handleOptimize = async () => {
     if (!selectedQuestion) return;
     if (!answer.trim()) {
-      message.warning("先写一版回答，再压缩表达");
+      message.warning("先写一版回答，再优化表达");
       return;
     }
 
@@ -200,7 +200,7 @@ export function TrainingPanel({ sessionId, questions, domainLabel, onSessionUpda
               生成追问
             </Button>
             <Button onClick={handleOptimize} loading={optimizationLoading}>
-              30 秒优化
+              优化回答
             </Button>
             <Button onClick={handleReflect} loading={reflectionLoading}>
               二次检查
@@ -212,10 +212,11 @@ export function TrainingPanel({ sessionId, questions, domainLabel, onSessionUpda
 
           {optimization && (
             <div className="training-section">
-              <Alert type="success" showIcon message={`表达结构评分 ${optimization.structureScore}`} />
+              <Alert type="success" showIcon message={`回答完整度评分 ${optimization.structureScore}`} />
               <div className="optimization-box">
-                <strong>30 秒版本</strong>
+                <strong>优化后的回答</strong>
                 <p>{optimization.optimized}</p>
+                <strong>表达建议</strong>
                 <div className="evidence-list">
                   {optimization.suggestions.map((item) => (
                     <Tag color="orange" key={item}>{item}</Tag>

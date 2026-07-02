@@ -1,12 +1,10 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { EvaluationResult, MemoryProfile } from "../../src/shared/types.js";
+import { getDatabase, readJsonColumn, writeDatabase } from "./database.js";
+import { serverDataDir } from "./paths.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const dataDir = path.resolve(__dirname, "../data");
-const memoryFile = path.join(dataDir, "memory.json");
+const legacyMemoryFile = path.join(serverDataDir, "memory.json");
 const defaultCandidateId = "local-user";
 
 function emptyMemory(candidateId = defaultCandidateId): MemoryProfile {
@@ -19,21 +17,43 @@ function emptyMemory(candidateId = defaultCandidateId): MemoryProfile {
   };
 }
 
-async function ensureMemoryStore() {
-  await fs.mkdir(dataDir, { recursive: true });
+let migrationPromise: Promise<void> | undefined;
+
+async function migrateLegacyMemory() {
+  const db = await getDatabase();
+  const existing = db.exec("SELECT COUNT(*) AS count FROM memory_profiles");
+  const count = Number(existing[0]?.values[0]?.[0] ?? 0);
+  if (count > 0) return;
 
   try {
-    await fs.access(memoryFile);
+    const raw = await fs.readFile(legacyMemoryFile, "utf-8");
+    const memory = JSON.parse(raw) as MemoryProfile;
+    if (!memory?.candidateId) return;
+
+    await writeDatabase((database) => {
+      database.run("INSERT OR REPLACE INTO memory_profiles (candidate_id, data, updated_at) VALUES (?, ?, ?)", [
+        memory.candidateId,
+        JSON.stringify(memory),
+        memory.updatedAt
+      ]);
+    });
   } catch {
-    await fs.writeFile(memoryFile, JSON.stringify(emptyMemory(), null, 2), "utf-8");
+    return;
   }
 }
 
+async function ensureMigrated() {
+  migrationPromise ??= migrateLegacyMemory();
+  await migrationPromise;
+}
+
 export async function getMemoryProfile(candidateId = defaultCandidateId): Promise<MemoryProfile> {
-  await ensureMemoryStore();
-  const raw = await fs.readFile(memoryFile, "utf-8");
-  const memory = JSON.parse(raw) as MemoryProfile;
-  return memory.candidateId === candidateId ? memory : emptyMemory(candidateId);
+  await ensureMigrated();
+  const db = await getDatabase();
+  return (
+    readJsonColumn<MemoryProfile>(db, "SELECT data FROM memory_profiles WHERE candidate_id = ?", [candidateId])[0] ??
+    emptyMemory(candidateId)
+  );
 }
 
 export async function updateMemoryProfile(input: {
@@ -75,6 +95,13 @@ export async function updateMemoryProfile(input: {
     ].slice(0, 30)
   };
 
-  await fs.writeFile(memoryFile, JSON.stringify(next, null, 2), "utf-8");
+  await writeDatabase((db) => {
+    db.run("INSERT OR REPLACE INTO memory_profiles (candidate_id, data, updated_at) VALUES (?, ?, ?)", [
+      next.candidateId,
+      JSON.stringify(next),
+      next.updatedAt
+    ]);
+  });
+
   return next;
 }

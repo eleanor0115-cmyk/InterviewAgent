@@ -101,9 +101,22 @@ export type InterviewPlan = {
     reason: string;
   }[];
   rounds: {
-    type: QuestionType;
+    type: string;
     questionCount: number;
     followUpDepth: number;
+  }[];
+  reverseQuestions: {
+    question: string;
+    reason: string;
+    followUpBridge?: string;
+  }[];
+  ragReferences?: {
+    id: string;
+    kind: "interview_experience" | "training_memory";
+    title: string;
+    relevance: number;
+    reason: string;
+    metadata: Record<string, unknown>;
   }[];
 };
 
@@ -199,6 +212,29 @@ export type ModelConfigUpdate = {
   apiKey?: string;
   baseUrl: string;
   model: string;
+};
+
+export type ParsedResumeSection = {
+  title: string;
+  items: string[];
+};
+
+export type ParsedResume = {
+  fileName: string;
+  rawText: string;
+  formattedText: string;
+  fields: {
+    name?: string;
+    phone?: string;
+    email?: string;
+    education: string[];
+    skills: string[];
+    projects: ParsedResumeSection[];
+    internships: ParsedResumeSection[];
+    workExperience: ParsedResumeSection[];
+    awards: string[];
+    other: ParsedResumeSection[];
+  };
 };
 
 export type InterviewPracticeRecord = {

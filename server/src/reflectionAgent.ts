@@ -1,65 +1,117 @@
 import type { EvaluationResult, FollowUpQuestion, ReflectionResult } from "../../src/shared/types.js";
+import {
+  asArray,
+  asEnum,
+  asMemoryLevel,
+  asNumber,
+  asRecord,
+  asString,
+  asStringArray,
+  unwrapPayload
+} from "./agentValidation.js";
+import { reflectionAgentSchema } from "./agentSchemas.js";
+import { createStructuredChatCompletion, extractJsonObject } from "./llmClient.js";
 
-function hasQuestionWith(texts: string[], pattern: RegExp) {
-  return texts.some((text) => pattern.test(text));
-}
-
-export function reflectInterviewResult(input: {
+type ReflectionInput = {
   question: string;
   answer: string;
   followUps: FollowUpQuestion[];
   evaluation?: EvaluationResult;
   expectedPoints: string[];
   tags: string[];
-}): ReflectionResult {
-  const issues: string[] = [];
-  const revisedFollowUps: FollowUpQuestion[] = [];
-  const followUpTexts = input.followUps.map((item) => `${item.question} ${item.reason} ${item.focus}`);
-  const combined = `${input.question}\n${input.answer}\n${input.tags.join(" ")}`;
-  const isAiQuestion = /AI|大模型|LLM|Agent|Prompt|RAG|幻觉|隐私/i.test(combined);
+};
 
-  if (!hasQuestionWith(followUpTexts, /为什么|权衡|取舍|不用|选择/)) {
-    issues.push("追问缺少方案选择和技术权衡。");
-    revisedFollowUps.push({
-      question: "你为什么选择这个方案？当时有没有考虑过其他方案，最后为什么没有选？",
-      reason: "Reflection 发现原追问没有覆盖方案权衡。",
-      focus: "技术权衡"
-    });
-  }
+const systemPrompt = [
+  "你是 InterviewAgent 的 Reflection Agent，负责复查追问和评分是否一致、是否遗漏关键追问。",
+  "不要用固定检查规则；要结合问题、回答、追问、评分结果做二次判断。",
+  "如果原追问已经足够，verdict 输出 pass；如果缺少关键追问或评分明显矛盾，输出 revise 并给出 revisedFollowUps/revisedEvaluation。",
+  "AI 开放题要检查是否覆盖真实场景、人的判断边界、约束验证、幻觉/隐私风险和个人差异化优势。",
+  "输出必须是 JSON object，不要 Markdown，不要解释。"
+].join("\n");
 
-  if (!hasQuestionWith(followUpTexts, /指标|验证|数据|证明|效果/)) {
-    issues.push("追问缺少结果验证或指标证明。");
-    revisedFollowUps.push({
-      question: "这个结果你准备用什么指标证明？有没有上线前后的对比或验收标准？",
-      reason: "Reflection 发现原追问没有覆盖结果证明。",
-      focus: "结果验证"
-    });
-  }
+function buildUserPrompt(input: ReflectionInput) {
+  return JSON.stringify(
+    {
+      outputSchema: {
+        verdict: "pass | revise",
+        confidence: "number 0-100",
+        issues: ["string"],
+        revisedFollowUps: [{ question: "string", reason: "string", focus: "string" }],
+        revisedEvaluation: "可选，结构同 EvaluationResult"
+      },
+      input
+    },
+    null,
+    2
+  );
+}
 
-  if (isAiQuestion && !hasQuestionWith(followUpTexts, /幻觉|隐私|边界|人工|约束|校验/)) {
-    issues.push("AI 开放题缺少模型边界、幻觉或隐私约束追问。");
-    revisedFollowUps.push({
-      question: "如果 AI 输出出现幻觉，或者输入里包含敏感信息，你会怎么约束、校验和兜底？",
-      reason: "Reflection 发现 AI 题没有追到工程边界。",
-      focus: "AI 边界"
-    });
-  }
+function normalizeFollowUps(value: unknown): FollowUpQuestion[] {
+  return asArray(value, "reflectionResponse.revisedFollowUps")
+    .map((item) => {
+      const followUp = asRecord(item, "reflectionResponse.revisedFollowUps[]");
+      return {
+        question: asString(followUp.question, "reflectionResponse.revisedFollowUps[].question"),
+        reason: asString(followUp.reason, "reflectionResponse.revisedFollowUps[].reason"),
+        focus: asString(followUp.focus, "reflectionResponse.revisedFollowUps[].focus")
+      };
+    })
+    .slice(0, 3);
+}
 
-  if (input.evaluation && input.evaluation.score >= 85 && input.evaluation.weaknesses.length >= 3) {
-    issues.push("评分较高但弱点较多，建议重新校准分数或明确扣分原因。");
-  }
-
-  if (input.evaluation && input.evaluation.score < 65 && input.evaluation.strengths.length >= 3) {
-    issues.push("评分较低但亮点较多，建议确认是否过度扣分。");
-  }
-
-  const confidence = Math.max(58, 92 - issues.length * 12);
+function normalizeEvaluation(value: unknown): EvaluationResult | undefined {
+  if (!value) return undefined;
+  const payload = asRecord(value, "reflectionResponse.revisedEvaluation");
+  const dimensionScores = asRecord(payload.dimensionScores, "reflectionResponse.revisedEvaluation.dimensionScores");
+  const memoryUpdates = asArray(payload.memoryUpdates ?? [], "reflectionResponse.revisedEvaluation.memoryUpdates")
+    .map((item) => {
+      const update = asRecord(item, "reflectionResponse.revisedEvaluation.memoryUpdates[]");
+      return {
+        tag: asString(update.tag, "reflectionResponse.revisedEvaluation.memoryUpdates[].tag"),
+        level: asMemoryLevel(update.level, "reflectionResponse.revisedEvaluation.memoryUpdates[].level"),
+        reason: asString(update.reason, "reflectionResponse.revisedEvaluation.memoryUpdates[].reason")
+      };
+    })
+    .slice(0, 6);
 
   return {
-    verdict: issues.length > 0 ? "revise" : "pass",
-    confidence,
-    issues,
-    revisedFollowUps: revisedFollowUps.slice(0, 3),
-    revisedEvaluation: input.evaluation
+    score: asNumber(payload.score, "reflectionResponse.revisedEvaluation.score", 0, 100),
+    dimensionScores: {
+      relevance: asNumber(dimensionScores.relevance, "reflectionResponse.revisedEvaluation.dimensionScores.relevance", 0, 100),
+      depth: asNumber(dimensionScores.depth, "reflectionResponse.revisedEvaluation.dimensionScores.depth", 0, 100),
+      structure: asNumber(dimensionScores.structure, "reflectionResponse.revisedEvaluation.dimensionScores.structure", 0, 100),
+      evidence: asNumber(dimensionScores.evidence, "reflectionResponse.revisedEvaluation.dimensionScores.evidence", 0, 100),
+      reflection: asNumber(dimensionScores.reflection, "reflectionResponse.revisedEvaluation.dimensionScores.reflection", 0, 100)
+    },
+    strengths: asStringArray(payload.strengths ?? [], "reflectionResponse.revisedEvaluation.strengths", 8),
+    weaknesses: asStringArray(payload.weaknesses ?? [], "reflectionResponse.revisedEvaluation.weaknesses", 8),
+    missingPoints: asStringArray(payload.missingPoints ?? [], "reflectionResponse.revisedEvaluation.missingPoints", 8),
+    suggestedAnswer: asStringArray(payload.suggestedAnswer ?? [], "reflectionResponse.revisedEvaluation.suggestedAnswer", 8),
+    nextPractice: asStringArray(payload.nextPractice ?? [], "reflectionResponse.revisedEvaluation.nextPractice", 8),
+    memoryUpdates
   };
+}
+
+function normalizeReflection(value: unknown): ReflectionResult {
+  const payload = unwrapPayload(value, ["reflection", "result", "data"], "reflectionResponse");
+
+  return {
+    verdict: asEnum(payload.verdict, ["pass", "revise"] as const, "reflectionResponse.verdict"),
+    confidence: asNumber(payload.confidence, "reflectionResponse.confidence", 0, 100),
+    issues: asStringArray(payload.issues, "reflectionResponse.issues", 8),
+    revisedFollowUps: normalizeFollowUps(payload.revisedFollowUps ?? []),
+    revisedEvaluation: normalizeEvaluation(payload.revisedEvaluation)
+  };
+}
+
+export async function reflectInterviewResult(input: ReflectionInput): Promise<ReflectionResult> {
+  const raw = await createStructuredChatCompletion(
+    [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: buildUserPrompt(input) }
+    ],
+    reflectionAgentSchema
+  );
+
+  return normalizeReflection(extractJsonObject(raw));
 }

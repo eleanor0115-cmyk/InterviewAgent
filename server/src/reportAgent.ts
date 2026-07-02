@@ -1,10 +1,7 @@
-import type {
-  EvaluationResult,
-  InterviewPracticeRecord,
-  InterviewReport,
-  InterviewSession,
-  MemoryProfile
-} from "../../src/shared/types.js";
+import type { EvaluationResult, InterviewReport, InterviewSession, MemoryProfile } from "../../src/shared/types.js";
+import { asArray, asNumber, asRecord, asString, asStringArray, unwrapPayload } from "./agentValidation.js";
+import { reportAgentSchema } from "./agentSchemas.js";
+import { createStructuredChatCompletion, extractJsonObject } from "./llmClient.js";
 
 const dimensionLabels: Record<keyof EvaluationResult["dimensionScores"], string> = {
   relevance: "扣题",
@@ -14,154 +11,108 @@ const dimensionLabels: Record<keyof EvaluationResult["dimensionScores"], string>
   reflection: "复盘"
 };
 
-function average(values: number[]) {
-  if (values.length === 0) return 0;
-  return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
+const systemPrompt = [
+  "你是 InterviewAgent 的 Report Agent，负责生成候选人的面试训练复盘报告。",
+  "报告必须基于 session 中的岗位画像、面经分析、准备方案、训练题和真实练习记录；不要使用本地规则拼总结。",
+  "如果练习记录很少，要明确说明可信度有限，但仍可基于已有材料给下一步训练建议。",
+  "总分和维度分由你根据材料综合判断，不要简单平均。",
+  "高风险问题必须来自 initialQuestions 或 practiceRecords，不要编造不存在的问题。",
+  "表达主线只能基于候选人已有简历/回答线索，不要编造量化结果，不强制压缩到 30 秒。",
+  "markdown 字段要是一份完整中文复盘报告。",
+  "输出必须是 JSON object，不要 Markdown 包裹，不要额外解释。"
+].join("\n");
+
+function slimSession(session: InterviewSession) {
+  return {
+    id: session.id,
+    company: session.company,
+    jobTitle: session.jobTitle,
+    jobDomains: session.jobDomains,
+    jdText: session.jdText.slice(0, 2200),
+    resumeText: session.resumeText.slice(0, 2200),
+    profileAnalysis: session.profileAnalysis,
+    experienceAnalysis: session.experienceAnalysis,
+    interviewPlan: session.interviewPlan,
+    initialQuestions: session.initialQuestions?.slice(0, 10),
+    practiceRecords: session.practiceRecords?.slice(0, 12)
+  };
 }
 
-function unique(items: string[]) {
-  return [...new Set(items.filter(Boolean))];
-}
-
-function fallbackRecords(session: InterviewSession): InterviewPracticeRecord[] {
-  return (session.initialQuestions ?? []).slice(0, 3).map((question, index) => ({
-    id: `fallback-${index}`,
-    question,
-    answer: "",
-    followUps: [],
-    evaluation: {
-      score: 0,
-      dimensionScores: {
-        relevance: 0,
-        depth: 0,
-        structure: 0,
-        evidence: 0,
-        reflection: 0
+function buildUserPrompt(session: InterviewSession, memory?: MemoryProfile) {
+  return JSON.stringify(
+    {
+      outputSchema: {
+        overallScore: "number 0-100",
+        dimensionScores: {
+          relevance: "number 0-100",
+          depth: "number 0-100",
+          structure: "number 0-100",
+          evidence: "number 0-100",
+          reflection: "number 0-100"
+        },
+        summary: "string",
+        strengths: ["string"],
+        weaknesses: ["string"],
+        riskyQuestions: [{ question: "string", score: "number 0-100", reason: "string" }],
+        nextPlan: ["string"],
+        thirtySecondRewrite: "string，候选人可直接用于自我介绍或项目表达的表达主线",
+        markdown: "string"
       },
-      strengths: [],
-      weaknesses: ["这道题还没有完成评分，建议先在单题训练中作答。"],
-      missingPoints: question.expectedPoints,
-      suggestedAnswer: question.expectedPoints,
-      nextPractice: question.expectedPoints,
-      memoryUpdates: question.tags.map((tag) => ({
-        tag,
-        level: "weak",
-        reason: "尚未训练。"
-      }))
+      session: slimSession(session),
+      memory
     },
-    createdAt: session.updatedAt
-  }));
+    null,
+    2
+  );
 }
 
-function buildThirtySecondRewrite(session: InterviewSession, records: InterviewPracticeRecord[]) {
-  const strongestProject = session.profileAnalysis?.resumeStrengths[0]?.evidence[0] ?? "我做过一个和目标岗位相关的项目";
-  const bestRecord = [...records].sort((a, b) => b.evaluation.score - a.evaluation.score)[0];
-  const focus = bestRecord?.question.tags[0] ?? session.profileAnalysis?.summary.preparationPriority[0] ?? "项目深挖";
-  const resultSignal = session.profileAnalysis?.resumeStrengths
-    .flatMap((strength) => strength.evidence)
-    .find((item) => /%|提升|降低|上线|效率|时间|指标|1s|天/.test(item));
-
-  return [
-    `我的核心匹配点是能把「${focus}」落到真实项目里。`,
-    `以「${strongestProject}」为例，我不是只完成开发，而是先拆清核心问题和约束，再决定方案边界。`,
-    resultSignal ? `结果上有「${resultSignal}」这样的验证。` : "结果上我会补充上线效果、效率变化或质量指标来证明方案有效。",
-    "这件事也沉淀了我的方法：先定义问题，再做方案权衡，最后用数据或可验收标准收口。"
-  ].join("");
-}
-
-function buildMarkdown(report: Omit<InterviewReport, "markdown">, session: InterviewSession) {
-  const lines = [
-    `# ${session.company} · ${session.jobTitle} 面试复盘`,
-    "",
-    `- 总分：${report.overallScore}`,
-    `- 生成时间：${report.generatedAt}`,
-    "",
-    "## 总结",
-    report.summary,
-    "",
-    "## 维度评分",
-    ...report.radarData.map((item) => `- ${item.name}：${item.value}`),
-    "",
-    "## 优势",
-    ...report.strengths.map((item) => `- ${item}`),
-    "",
-    "## 待补强",
-    ...report.weaknesses.map((item) => `- ${item}`),
-    "",
-    "## 高风险题",
-    ...report.riskyQuestions.map((item) => `- ${item.question}（${item.score}）：${item.reason}`),
-    "",
-    "## 下一轮训练计划",
-    ...report.nextPlan.map((item) => `- ${item}`),
-    "",
-    "## 30 秒表达版本",
-    report.thirtySecondRewrite
-  ];
-
-  return lines.join("\n");
-}
-
-export function createReport(session: InterviewSession, memory?: MemoryProfile): InterviewReport {
-  const records =
-    session.practiceRecords && session.practiceRecords.length > 0 ? session.practiceRecords : fallbackRecords(session);
-  const scoredRecords = records.filter((record) => record.evaluation.score > 0);
-  const scoreBase = scoredRecords.length > 0 ? scoredRecords : records;
-  const dimensionKeys = Object.keys(dimensionLabels) as Array<keyof EvaluationResult["dimensionScores"]>;
-  const dimensionScores = Object.fromEntries(
-    dimensionKeys.map((key) => [key, average(scoreBase.map((record) => record.evaluation.dimensionScores[key]))])
-  ) as EvaluationResult["dimensionScores"];
-  const overallScore =
-    scoredRecords.length > 0
-      ? average(scoredRecords.map((record) => record.evaluation.score))
-      : Math.max(45, Math.min(75, session.profileAnalysis?.summary.matchScore ?? 60));
-  const weaknesses = unique([
-    ...records.flatMap((record) => record.evaluation.weaknesses),
-    ...(memory?.weakTags.map((tag) => `${tag} 仍需继续训练。`) ?? [])
-  ]).slice(0, 8);
-  const strengths = unique([
-    ...records.flatMap((record) => record.evaluation.strengths),
-    ...(session.profileAnalysis?.resumeStrengths.map((item) => item.title) ?? [])
-  ]).slice(0, 6);
-  const riskyQuestions = [...records]
-    .sort((a, b) => a.evaluation.score - b.evaluation.score)
-    .slice(0, 5)
-    .map((record) => ({
-      question: record.question.question,
-      score: record.evaluation.score,
-      reason: record.evaluation.weaknesses[0] ?? "建议继续补充回答细节。"
-    }));
-  const nextPlan = unique([
-    ...records.flatMap((record) => record.evaluation.nextPractice),
-    ...(session.profileAnalysis?.summary.preparationPriority.map((item) => `优先训练：${item}`) ?? []),
-    ...(memory?.weakTags.map((tag) => `针对 ${tag} 再练一题，并补齐为什么、怎么验证和边界。`) ?? [])
-  ]).slice(0, 8);
-  const radarData = dimensionKeys.map((key) => ({
-    name: dimensionLabels[key],
-    value: dimensionScores[key]
-  }));
-  const summary =
-    scoredRecords.length > 0
-      ? `本轮完成 ${scoredRecords.length} 道题评分，平均分 ${overallScore}。接下来优先补强 ${weaknesses
-          .slice(0, 2)
-          .join("、") || "项目深度和表达结构"}。`
-      : "还没有完整评分记录，报告先基于岗位画像、面试计划和待训练题生成，建议完成 2-3 道单题评分后刷新报告。";
-
-  const reportWithoutMarkdown = {
-    sessionId: session.id,
-    generatedAt: new Date().toISOString(),
-    overallScore,
-    dimensionScores,
-    radarData,
-    summary,
-    strengths,
-    weaknesses,
-    riskyQuestions,
-    nextPlan,
-    thirtySecondRewrite: buildThirtySecondRewrite(session, records)
+function normalizeReport(value: unknown, sessionId: string): InterviewReport {
+  const payload = unwrapPayload(value, ["report", "result", "data"], "reportResponse");
+  const dimensionScores = asRecord(payload.dimensionScores, "reportResponse.dimensionScores");
+  const scores: EvaluationResult["dimensionScores"] = {
+    relevance: asNumber(dimensionScores.relevance, "reportResponse.dimensionScores.relevance", 0, 100),
+    depth: asNumber(dimensionScores.depth, "reportResponse.dimensionScores.depth", 0, 100),
+    structure: asNumber(dimensionScores.structure, "reportResponse.dimensionScores.structure", 0, 100),
+    evidence: asNumber(dimensionScores.evidence, "reportResponse.dimensionScores.evidence", 0, 100),
+    reflection: asNumber(dimensionScores.reflection, "reportResponse.dimensionScores.reflection", 0, 100)
   };
 
   return {
-    ...reportWithoutMarkdown,
-    markdown: buildMarkdown(reportWithoutMarkdown, session)
+    sessionId,
+    generatedAt: new Date().toISOString(),
+    overallScore: asNumber(payload.overallScore, "reportResponse.overallScore", 0, 100),
+    dimensionScores: scores,
+    radarData: Object.entries(dimensionLabels).map(([key, name]) => ({
+      name,
+      value: scores[key as keyof EvaluationResult["dimensionScores"]]
+    })),
+    summary: asString(payload.summary, "reportResponse.summary"),
+    strengths: asStringArray(payload.strengths, "reportResponse.strengths", 8),
+    weaknesses: asStringArray(payload.weaknesses, "reportResponse.weaknesses", 8),
+    riskyQuestions: asArray(payload.riskyQuestions, "reportResponse.riskyQuestions")
+      .map((item) => {
+        const question = asRecord(item, "reportResponse.riskyQuestions[]");
+        return {
+          question: asString(question.question, "reportResponse.riskyQuestions[].question"),
+          score: asNumber(question.score, "reportResponse.riskyQuestions[].score", 0, 100),
+          reason: asString(question.reason, "reportResponse.riskyQuestions[].reason")
+        };
+      })
+      .slice(0, 6),
+    nextPlan: asStringArray(payload.nextPlan, "reportResponse.nextPlan", 8),
+    thirtySecondRewrite: asString(payload.thirtySecondRewrite, "reportResponse.thirtySecondRewrite"),
+    markdown: asString(payload.markdown, "reportResponse.markdown")
   };
+}
+
+export async function createReport(session: InterviewSession, memory?: MemoryProfile): Promise<InterviewReport> {
+  const raw = await createStructuredChatCompletion(
+    [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: buildUserPrompt(session, memory) }
+    ],
+    reportAgentSchema
+  );
+
+  return normalizeReport(extractJsonObject(raw), session.id);
 }

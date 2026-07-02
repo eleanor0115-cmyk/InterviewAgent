@@ -1,12 +1,18 @@
 import "dotenv/config";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { ModelConfigInfo, ModelConfigUpdate } from "../../src/shared/types.js";
+import { serverDataDir } from "./paths.js";
 
 type ChatMessage = {
   role: "system" | "user" | "assistant";
   content: string;
+};
+
+type JsonSchemaDefinition = {
+  name: string;
+  schema: Record<string, unknown>;
+  strict?: boolean;
 };
 
 type ChatCompletionResponse = {
@@ -26,10 +32,7 @@ type StoredModelConfig = {
   model?: string;
 };
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const dataDir = path.resolve(__dirname, "../data");
-const configFile = path.join(dataDir, "model-config.json");
+const configFile = path.join(serverDataDir, "model-config.json");
 
 async function readStoredModelConfig(): Promise<StoredModelConfig> {
   try {
@@ -41,7 +44,7 @@ async function readStoredModelConfig(): Promise<StoredModelConfig> {
 }
 
 async function writeStoredModelConfig(config: StoredModelConfig) {
-  await fs.mkdir(dataDir, { recursive: true });
+  await fs.mkdir(serverDataDir, { recursive: true });
   await fs.writeFile(configFile, JSON.stringify(config, null, 2), "utf-8");
 }
 
@@ -103,7 +106,10 @@ export async function updateLlmRuntimeConfig(input: ModelConfigUpdate): Promise<
   return getLlmRuntimeInfo();
 }
 
-export async function createJsonChatCompletion(messages: ChatMessage[]) {
+async function requestChatCompletion(input: {
+  messages: ChatMessage[];
+  responseFormat: Record<string, unknown>;
+}) {
   const { apiKey, baseUrl, model } = await getRuntimeConfig();
 
   if (!apiKey) {
@@ -118,9 +124,9 @@ export async function createJsonChatCompletion(messages: ChatMessage[]) {
     },
     body: JSON.stringify({
       model,
-      messages,
+      messages: input.messages,
       temperature: 0.2,
-      response_format: { type: "json_object" }
+      response_format: input.responseFormat
     })
   });
 
@@ -136,6 +142,48 @@ export async function createJsonChatCompletion(messages: ChatMessage[]) {
   }
 
   return content;
+}
+
+export async function createJsonChatCompletion(messages: ChatMessage[]) {
+  return requestChatCompletion({
+    messages,
+    responseFormat: { type: "json_object" }
+  });
+}
+
+export async function createStructuredChatCompletion(messages: ChatMessage[], schema: JsonSchemaDefinition) {
+  try {
+    return await requestChatCompletion({
+      messages,
+      responseFormat: {
+        type: "json_schema",
+        json_schema: {
+          name: schema.name,
+          strict: schema.strict ?? true,
+          schema: schema.schema
+        }
+      }
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const unsupported = /response_format|json_schema|schema|unsupported|invalid/i.test(message);
+
+    if (!unsupported) {
+      throw error;
+    }
+
+    return createJsonChatCompletion([
+      {
+        role: "system",
+        content: [
+          "当前模型服务不支持 strict JSON Schema response_format。",
+          "你必须严格按照下面 JSON Schema 输出一个 JSON object，不要 Markdown，不要解释。",
+          JSON.stringify({ name: schema.name, schema: schema.schema }, null, 2)
+        ].join("\n")
+      },
+      ...messages
+    ]);
+  }
 }
 
 export function extractJsonObject(raw: string) {
