@@ -116,6 +116,9 @@ export type InterviewPlan = {
     title: string;
     relevance: number;
     reason: string;
+    source?: string;
+    excerpt?: string;
+    matchedTerms?: string[];
     metadata: Record<string, unknown>;
   }[];
 };
@@ -246,6 +249,53 @@ export type InterviewPracticeRecord = {
   createdAt: string;
 };
 
+export type TrainingStage = "ready" | "evaluating" | "reinforcing" | "completed" | "failed";
+
+export type TrainingAttempt = {
+  id: string;
+  round: number;
+  question: InterviewQuestion;
+  answer: string;
+  evaluation: EvaluationResult;
+  createdAt: string;
+};
+
+export type TrainingRun = {
+  id: string;
+  sessionId: string;
+  baseQuestionKey: string;
+  stage: TrainingStage;
+  originalQuestion: InterviewQuestion;
+  currentQuestion: InterviewQuestion;
+  currentRound: number;
+  maxRounds: number;
+  targetScore: number;
+  scoreHistory: number[];
+  askedQuestions: string[];
+  attempts: TrainingAttempt[];
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TrainingSubmissionResult = {
+  run: TrainingRun;
+  attempt: TrainingAttempt;
+  memory: MemoryProfile;
+  session: InterviewSession;
+  decision: "reinforce" | "targeted_follow_up" | "complete";
+  replayed?: boolean;
+};
+
+export type KnowledgeMastery = {
+  knowledgePoint: string;
+  attempts: number;
+  latestScore: number;
+  averageScore: number;
+  bestScore: number;
+  lastPracticedAt: string;
+};
+
 export type InterviewReport = {
   sessionId: string;
   generatedAt: string;
@@ -272,6 +322,7 @@ export type MemoryProfile = {
   candidateId: string;
   weakTags: string[];
   strongTags: string[];
+  knowledgeMastery: KnowledgeMastery[];
   updatedAt: string;
   history: {
     question: string;

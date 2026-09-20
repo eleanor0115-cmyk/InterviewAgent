@@ -1033,3 +1033,20 @@ textarea {
     gap: 4px;
   }
 }
+
+
+.submit-progress {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid #dce3e4;
+  border-radius: 8px;
+  background: #fbfcfc;
+}
+
+.submit-progress-tip {
+  margin: 8px 0 0;
+}
+
+.followup-item .ant-btn {
+  width: fit-content;
+}

@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { InterviewSession } from "../../src/shared/types.js";
+import { listAgentTraces } from "./agentTraceStore.js";
 import { evaluateAnswer } from "./evaluationAgent.js";
 import { analyzeExperience } from "./experienceAnalyzer.js";
 import { optimizeAnswerExpression } from "./expressionAgent.js";
@@ -32,9 +33,12 @@ import {
   practiceRecordSchema,
   profileAnalyzeSchema,
   reflectionSchema,
-  reportSchema
+  reportSchema,
+  trainingAnswerSchema,
+  trainingRunStartSchema
 } from "./schemas.js";
 import { getSession, listSessions, saveSession } from "./storage.js";
+import { getOrCreateTrainingRun, getTrainingRun, submitTrainingAnswer, TrainingConflictError } from "./trainingStore.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
@@ -55,6 +59,15 @@ app.use(express.json({ limit: "2mb" }));
 app.get("/api/health", async (_request, response, next) => {
   try {
     response.json({ ok: true, service: "InterviewAgent Pro API", llm: await getLlmRuntimeInfo(), rag: await getRagStats() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/agent-traces", async (request, response, next) => {
+  try {
+    const limit = Number(request.query.limit ?? 50);
+    response.json(await listAgentTraces(Number.isFinite(limit) ? limit : 50));
   } catch (error) {
     next(error);
   }
@@ -286,6 +299,37 @@ app.post("/api/interview/practice-records", async (request, response, next) => {
   }
 });
 
+app.post("/api/training-runs", async (request, response, next) => {
+  try {
+    const input = trainingRunStartSchema.parse(request.body);
+    response.json(await getOrCreateTrainingRun(input.sessionId, input.question));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/training-runs/:id", async (request, response, next) => {
+  try {
+    const run = await getTrainingRun(request.params.id);
+    if (!run) {
+      response.status(404).json({ message: "Training run not found" });
+      return;
+    }
+    response.json(run);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/training-runs/:id/answers", async (request, response, next) => {
+  try {
+    const input = trainingAnswerSchema.parse(request.body);
+    response.json(await submitTrainingAnswer({ runId: request.params.id, ...input }));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/knowledge/tree", async (request, response, next) => {
   try {
     const input = knowledgeTreeSchema.parse(request.body);
@@ -374,6 +418,10 @@ if (existsSync(clientIndexFile)) {
 }
 
 app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
+  if (error instanceof TrainingConflictError) {
+    response.status(409).json({ message: error.message });
+    return;
+  }
   if (error && typeof error === "object" && "issues" in error) {
     response.status(400).json({ message: "Validation failed", issues: error.issues });
     return;

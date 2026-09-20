@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import * as echarts from "echarts";
+import type { EChartsType } from "echarts";
 import { Alert, Button, Card, Col, Empty, List, Progress, Row, Skeleton, Space, Tag, Typography, message } from "antd";
 import { DownloadOutlined, ReloadOutlined } from "@ant-design/icons";
 import { generateReport, getSession } from "../api/client";
@@ -72,10 +72,18 @@ export function ReportPage() {
   }, [activeReport, session, setReportResult]);
 
   useEffect(() => {
-    if (!chartRef.current || !activeReport) return;
+    const chartEl = chartRef.current;
+    if (!chartEl || !activeReport) return;
 
-    const chart = echarts.init(chartRef.current);
-    chart.setOption({
+    let disposed = false;
+    let chart: EChartsType | undefined;
+    const handleResize = () => chart?.resize();
+
+    void import("echarts").then((echarts) => {
+      if (disposed) return;
+
+      chart = echarts.init(chartEl);
+      chart.setOption({
       tooltip: {},
       radar: {
         radius: "66%",
@@ -96,14 +104,15 @@ export function ReportPage() {
           ]
         }
       ]
+      });
+
+      window.addEventListener("resize", handleResize);
     });
 
-    const handleResize = () => chart.resize();
-    window.addEventListener("resize", handleResize);
-
     return () => {
+      disposed = true;
       window.removeEventListener("resize", handleResize);
-      chart.dispose();
+      chart?.dispose();
     };
   }, [activeReport]);
 

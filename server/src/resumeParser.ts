@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import type { ParsedResume, ParsedResumeSection } from "../../src/shared/types.js";
 import { asArray, asRecord, asString, asStringArray, unwrapPayload } from "./agentValidation.js";
 import { resumeParserAgentSchema } from "./agentSchemas.js";
-import { createStructuredChatCompletion, extractJsonObject } from "./llmClient.js";
+import { executeStructuredAgent } from "./agentExecutor.js";
 
 const require = createRequire(import.meta.url);
 const pdfParse = require("pdf-parse/lib/pdf-parse.js") as (buffer: Buffer) => Promise<{ text: string }>;
@@ -140,13 +140,13 @@ export async function parseResumeFile(input: ResumeFileInput): Promise<ParsedRes
     throw new Error("未能从文件中解析出足够的简历文本，请尝试 PDF/DOCX 或直接粘贴文本");
   }
 
-  const raw = await createStructuredChatCompletion(
-    [
+  return executeStructuredAgent({
+    agentName: "resume_parser",
+    schema: resumeParserAgentSchema,
+    messages: [
     { role: "system", content: systemPrompt },
     { role: "user", content: buildUserPrompt(fileName, rawText) }
     ],
-    resumeParserAgentSchema
-  );
-
-  return normalizeParsedResume(extractJsonObject(raw), fileName, rawText);
+    normalize: (value) => normalizeParsedResume(value, fileName, rawText)
+  });
 }

@@ -1,7 +1,7 @@
 import type { ExpressionOptimization } from "../../src/shared/types.js";
 import { asNumber, asRecord, asString, asStringArray, unwrapPayload } from "./agentValidation.js";
 import { expressionAgentSchema } from "./agentSchemas.js";
-import { createStructuredChatCompletion, extractJsonObject } from "./llmClient.js";
+import { executeStructuredAgent } from "./agentExecutor.js";
 
 type ExpressionInput = {
   answer: string;
@@ -61,13 +61,13 @@ function normalizeExpression(value: unknown): ExpressionOptimization {
 }
 
 export async function optimizeAnswerExpression(input: ExpressionInput): Promise<ExpressionOptimization> {
-  const raw = await createStructuredChatCompletion(
-    [
+  return executeStructuredAgent({
+    agentName: "expression_optimizer",
+    schema: expressionAgentSchema,
+    messages: [
     { role: "system", content: systemPrompt },
     { role: "user", content: buildUserPrompt(input) }
     ],
-    expressionAgentSchema
-  );
-
-  return normalizeExpression(extractJsonObject(raw));
+    normalize: normalizeExpression
+  });
 }

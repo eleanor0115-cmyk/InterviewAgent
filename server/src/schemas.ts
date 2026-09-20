@@ -135,6 +135,17 @@ export const practiceRecordSchema = z.object({
   evaluation: evaluationResultSchema
 });
 
+export const trainingRunStartSchema = z.object({
+  sessionId: z.string().trim().min(1),
+  question: interviewQuestionSchema
+});
+
+export const trainingAnswerSchema = z.object({
+  answer: z.string().trim().min(1, "请输入你的回答"),
+  idempotencyKey: z.string().trim().min(8),
+  followUps: z.array(followUpQuestionSchema).default([])
+});
+
 export const reportSchema = z.object({
   sessionId: z.string().trim().min(1)
 });

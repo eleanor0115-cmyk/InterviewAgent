@@ -1,7 +1,7 @@
 import type { InterviewSession, KnowledgeTree } from "../../src/shared/types.js";
 import { asArray, asRecord, asString, asStringArray, unwrapPayload } from "./agentValidation.js";
 import { knowledgeTreeAgentSchema } from "./agentSchemas.js";
-import { createStructuredChatCompletion, extractJsonObject } from "./llmClient.js";
+import { executeStructuredAgent } from "./agentExecutor.js";
 
 const systemPrompt = [
   "你是 InterviewAgent 的 Knowledge Tree Agent，负责把本次面试准备材料生成知识图谱。",
@@ -77,13 +77,13 @@ function normalizeTree(value: unknown): KnowledgeTree {
 }
 
 export async function createKnowledgeTree(session: InterviewSession): Promise<KnowledgeTree> {
-  const raw = await createStructuredChatCompletion(
-    [
+  return executeStructuredAgent({
+    agentName: "knowledge_tree",
+    schema: knowledgeTreeAgentSchema,
+    messages: [
     { role: "system", content: systemPrompt },
     { role: "user", content: buildUserPrompt(session) }
     ],
-    knowledgeTreeAgentSchema
-  );
-
-  return normalizeTree(extractJsonObject(raw));
+    normalize: normalizeTree
+  });
 }

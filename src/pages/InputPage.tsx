@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Alert, Button, Checkbox, Form, Input, Space, Tag, Typography, Upload, message } from "antd";
+import { Alert, Button, Checkbox, Form, Input, Space, Steps, Tag, Typography, Upload, message } from "antd";
 import type { UploadProps } from "antd";
 import { ClearOutlined, DeleteOutlined, DownloadOutlined, FileTextOutlined, RocketOutlined, SaveOutlined } from "@ant-design/icons";
 import type { CreateSessionInput, JobDomain, ParsedResume } from "../shared/types";
@@ -75,6 +75,7 @@ export function InputPage() {
   const [form] = Form.useForm<CreateSessionInput>();
   const [submitting, setSubmitting] = useState(false);
   const [resumeParsing, setResumeParsing] = useState(false);
+  const [submitStage, setSubmitStage] = useState<number | null>(null);
   const [hasResumeCache, setHasResumeCache] = useState(false);
   const [parsedResume, setParsedResume] = useState<ParsedResume>();
   const navigate = useNavigate();
@@ -180,6 +181,7 @@ export function InputPage() {
 
   const handleSubmit = async (values: CreateSessionInput) => {
     setSubmitting(true);
+    setSubmitStage(0);
 
     try {
       const payload: CreateSessionInput = {
@@ -193,25 +195,28 @@ export function InputPage() {
 
       const session = await createSession(payload);
       setCurrentSession(session);
+      setSubmitStage(1);
 
-      const profileResult = await analyzeProfile({
-        sessionId: session.id,
-        company: payload.company,
-        jobTitle: payload.jobTitle,
-        jdText: payload.jdText,
-        resumeText: payload.resumeText
-      });
+      const [profileResult, experienceResult] = await Promise.all([
+        analyzeProfile({
+          sessionId: session.id,
+          company: payload.company,
+          jobTitle: payload.jobTitle,
+          jdText: payload.jdText,
+          resumeText: payload.resumeText
+        }),
+        analyzeExperience({
+          sessionId: session.id,
+          company: payload.company,
+          jobTitle: payload.jobTitle,
+          experienceText: payload.experienceText,
+          jdText: payload.jdText,
+          resumeText: payload.resumeText
+        })
+      ]);
       setProfileResult(profileResult);
-
-      const experienceResult = await analyzeExperience({
-        sessionId: session.id,
-        company: payload.company,
-        jobTitle: payload.jobTitle,
-        experienceText: payload.experienceText,
-        jdText: payload.jdText,
-        resumeText: payload.resumeText
-      });
       setExperienceResult(experienceResult);
+      setSubmitStage(2);
 
       const plannerResult = await createPlan({ sessionId: session.id });
       setPlannerResult(plannerResult);
@@ -222,6 +227,18 @@ export function InputPage() {
       message.error(error instanceof Error ? error.message : "提交失败");
     } finally {
       setSubmitting(false);
+      setSubmitStage(null);
+    }
+  };
+
+  const handleSaveDraftOnly = async () => {
+    try {
+      const values = await form.validateFields();
+      writeInputDraft(values);
+      writeResumeCache(values.resumeText);
+      message.success("资料已保存为草稿，不会触发生成");
+    } catch {
+      // 表单校验失败时 antd 会自动提示，这里无需额外处理
     }
   };
 
@@ -344,13 +361,31 @@ export function InputPage() {
           <Button icon={<ClearOutlined />} onClick={handleClearDraft} disabled={submitting}>
             清空资料
           </Button>
-          <Button icon={<SaveOutlined />} onClick={() => form.submit()} loading={submitting}>
+          <Button icon={<SaveOutlined />} onClick={handleSaveDraftOnly} disabled={submitting}>
             保存资料
           </Button>
           <Button type="primary" icon={<RocketOutlined />} onClick={() => form.submit()} loading={submitting}>
-            生成准备方案
+            生成准备方案（约 3~4 分钟）
           </Button>
         </Space>
+
+        {submitStage !== null && (
+          <div className="submit-progress">
+            <Steps
+              size="small"
+              current={submitStage}
+              items={[
+                { title: "创建记录" },
+                { title: "解析简历与 JD / 面经（并行）" },
+                { title: "生成训练计划" },
+                { title: "完成" }
+              ]}
+            />
+            <Typography.Paragraph type="secondary" className="submit-progress-tip">
+              模型正在处理，全程约 3~4 分钟，请不要关闭页面。
+            </Typography.Paragraph>
+          </div>
+        )}
       </Form>
     </section>
   );

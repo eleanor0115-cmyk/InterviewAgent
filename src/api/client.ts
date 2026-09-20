@@ -16,7 +16,9 @@ import type {
   ModelConfigUpdate,
   ParsedResume,
   ProfileAnalysis,
-  ReflectionResult
+  ReflectionResult,
+  TrainingRun,
+  TrainingSubmissionResult
 } from "../shared/types";
 
 type ProfileAgentResponse = {
@@ -38,14 +40,30 @@ type PlannerResponse = {
   warning?: string;
 };
 
+const CLIENT_TIMEOUT_MS = 300_000;
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    headers: {
-      "Content-Type": "application/json",
-      ...options?.headers
-    },
-    ...options
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CLIENT_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers
+      },
+      ...options,
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error("请求超时，模型可能正在繁忙处理，请稍后重试");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
@@ -137,6 +155,29 @@ export function savePracticeRecord(input: {
   return request<{ record: InterviewPracticeRecord; session: InterviewSession }>("/api/interview/practice-records", {
     method: "POST",
     body: JSON.stringify(input)
+  });
+}
+
+export function startTrainingRun(input: { sessionId: string; question: InterviewQuestion }) {
+  return request<TrainingRun>("/api/training-runs", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export function submitTrainingAnswer(input: {
+  runId: string;
+  answer: string;
+  idempotencyKey: string;
+  followUps: FollowUpResult["followUps"];
+}) {
+  return request<TrainingSubmissionResult>(`/api/training-runs/${input.runId}/answers`, {
+    method: "POST",
+    body: JSON.stringify({
+      answer: input.answer,
+      idempotencyKey: input.idempotencyKey,
+      followUps: input.followUps
+    })
   });
 }
 

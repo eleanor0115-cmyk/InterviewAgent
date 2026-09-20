@@ -13,7 +13,7 @@ import {
   unwrapPayload
 } from "./agentValidation.js";
 import { plannerAgentSchema } from "./agentSchemas.js";
-import { createStructuredChatCompletion, extractJsonObject } from "./llmClient.js";
+import { executeStructuredAgent } from "./agentExecutor.js";
 import type { RagHit } from "./ragStore.js";
 import { summarizeRagHits } from "./ragStore.js";
 
@@ -240,6 +240,9 @@ function normalizePlan(value: unknown, ragContext: RagHit[]): PlannerResponse {
         title: hit.title,
         relevance: hit.relevance,
         reason: hit.reason,
+        source: hit.source,
+        excerpt: hit.excerpt,
+        matchedTerms: hit.matchedTerms,
         metadata: hit.metadata
       }))
     },
@@ -248,28 +251,13 @@ function normalizePlan(value: unknown, ragContext: RagHit[]): PlannerResponse {
 }
 
 export async function createInterviewPlan(session: InterviewSession, ragContext: RagHit[] = []): Promise<PlannerResponse> {
-  const raw = await createStructuredChatCompletion(
-    [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: buildUserPrompt(session, ragContext) }
-    ],
-    plannerAgentSchema
-  );
-
-  try {
-    return normalizePlan(extractJsonObject(raw), ragContext);
-  } catch (error) {
-    const repairedRaw = await createStructuredChatCompletion(
-      [
-      {
-        role: "system",
-        content: "你是严格的 JSON Schema 修复器。只修复 JSON 字段格式和枚举值，不新增解释，不使用 Markdown。"
-      },
-      { role: "user", content: buildPlannerRepairPrompt(raw, error) }
+  return executeStructuredAgent({
+    agentName: "planner",
+    schema: plannerAgentSchema,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: buildUserPrompt(session, ragContext) }
       ],
-      plannerAgentSchema
-    );
-
-    return normalizePlan(extractJsonObject(repairedRaw), ragContext);
-  }
+    normalize: (value) => normalizePlan(value, ragContext)
+  });
 }

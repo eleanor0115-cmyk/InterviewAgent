@@ -1,11 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Card, Col, Empty, Input, Progress, Row, Select, Space, Tag, Typography, message } from "antd";
 import {
-  evaluateInterviewAnswer,
   generateFollowUp,
   optimizeExpression,
   reflectInterview,
-  savePracticeRecord
+  startTrainingRun,
+  submitTrainingAnswer
 } from "../api/client";
 import type {
   EvaluationResult,
@@ -14,7 +14,8 @@ import type {
   InterviewQuestion,
   JobDomain,
   MemoryProfile,
-  ReflectionResult
+  ReflectionResult,
+  TrainingRun
 } from "../shared/types";
 
 type TrainingPanelProps = {
@@ -44,8 +45,14 @@ export function TrainingPanel({ sessionId, questions, domainLabel, onSessionUpda
   const [evaluationLoading, setEvaluationLoading] = useState(false);
   const [optimizationLoading, setOptimizationLoading] = useState(false);
   const [reflectionLoading, setReflectionLoading] = useState(false);
+  const [questionOverride, setQuestionOverride] = useState<InterviewQuestion | null>(null);
+  const [scoredAnswer, setScoredAnswer] = useState<string>();
+  const [trainingRun, setTrainingRun] = useState<TrainingRun>();
+  const [runLoading, setRunLoading] = useState(false);
+  const submissionKeyRef = useRef<string>();
 
-  const selectedQuestion = questions[selectedIndex];
+  const baseQuestion = questionOverride ?? questions[selectedIndex];
+  const selectedQuestion = trainingRun?.currentQuestion ?? baseQuestion;
   const selectOptions = useMemo(
     () =>
       questions.map((question, index) => ({
@@ -64,6 +71,31 @@ export function TrainingPanel({ sessionId, questions, domainLabel, onSessionUpda
         type: selectedQuestion.type
       }
     : undefined;
+
+  useEffect(() => {
+    if (!baseQuestion) return;
+    let cancelled = false;
+    setRunLoading(true);
+    setTrainingRun(undefined);
+    void startTrainingRun({ sessionId, question: baseQuestion })
+      .then((run) => {
+        if (cancelled) return;
+        setTrainingRun(run);
+        const latestAttempt = run.attempts.at(-1);
+        setEvaluation(latestAttempt?.evaluation);
+        setAnswer(run.stage === "completed" ? latestAttempt?.answer ?? "" : "");
+        setScoredAnswer(run.stage === "completed" ? latestAttempt?.answer : undefined);
+      })
+      .catch((error) => {
+        if (!cancelled) message.error(error instanceof Error ? error.message : "训练状态读取失败");
+      })
+      .finally(() => {
+        if (!cancelled) setRunLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [baseQuestion, sessionId]);
 
   const handleFollowUp = async () => {
     if (!requestPayload) return;
@@ -91,18 +123,33 @@ export function TrainingPanel({ sessionId, questions, domainLabel, onSessionUpda
 
     setEvaluationLoading(true);
     try {
-      const result = await evaluateInterviewAnswer(requestPayload);
-      setEvaluation(result.evaluation);
-      setMemory(result.memory);
-      await savePracticeRecord({
-        sessionId,
-        question: selectedQuestion,
+      if (!trainingRun) {
+        message.warning("训练状态尚未准备完成");
+        return;
+      }
+      submissionKeyRef.current ??= crypto.randomUUID();
+      const result = await submitTrainingAnswer({
+        runId: trainingRun.id,
         answer,
-        followUps: followUpResult?.followUps ?? [],
-        evaluation: result.evaluation
+        idempotencyKey: submissionKeyRef.current,
+        followUps: followUpResult?.followUps ?? []
       });
+      setTrainingRun(result.run);
+      setEvaluation(result.attempt.evaluation);
+      setMemory(result.memory);
       onSessionUpdated?.();
-      message.success("评分已记录到复盘报告");
+      submissionKeyRef.current = undefined;
+      if (result.decision === "complete") {
+        setScoredAnswer(answer);
+        message.success("本知识点训练已完成，评分已记录");
+      } else {
+        setAnswer("");
+        setScoredAnswer(undefined);
+        setFollowUpResult(undefined);
+        setOptimization(undefined);
+        setReflection(undefined);
+        message.success(result.decision === "reinforce" ? "已进入低分强化训练" : "已根据缺失点生成下一轮追问");
+      }
     } catch (error) {
       message.error(error instanceof Error ? error.message : "评分失败");
     } finally {
@@ -167,8 +214,56 @@ export function TrainingPanel({ sessionId, questions, domainLabel, onSessionUpda
     <Row gutter={[16, 16]} className="training-grid">
       <Col xs={24} xl={9}>
         <Card className="panel-card training-card" title="当前问题">
-          <Select className="question-select" value={selectedIndex} options={selectOptions} onChange={setSelectedIndex} />
+          <Select
+            className="question-select"
+            value={selectedIndex}
+            options={selectOptions}
+            onChange={(index) => {
+              setSelectedIndex(index);
+              setQuestionOverride(null);
+              setAnswer("");
+              setFollowUpResult(undefined);
+              setEvaluation(undefined);
+              setMemory(undefined);
+              setOptimization(undefined);
+              setReflection(undefined);
+              setScoredAnswer(undefined);
+            }}
+          />
+          {questionOverride && (
+            <Alert
+              type="info"
+              showIcon
+              message="正在训练追问"
+              description="当前题目来自上一轮追问，回答后可继续评分记录。"
+              action={
+                <Button size="small" onClick={() => {
+                  setQuestionOverride(null);
+                  setAnswer("");
+                  setFollowUpResult(undefined);
+                  setEvaluation(undefined);
+                  setMemory(undefined);
+                  setOptimization(undefined);
+                  setReflection(undefined);
+                  setScoredAnswer(undefined);
+                }}>
+                  返回原题
+                </Button>
+              }
+              style={{ marginBottom: 12 }}
+            />
+          )}
           <div className="training-question">
+            {trainingRun && (
+              <Alert
+                type={trainingRun.stage === "completed" ? "success" : "info"}
+                showIcon
+                message={trainingRun.stage === "completed"
+                  ? `训练完成 · 共 ${trainingRun.attempts.length} 轮`
+                  : `第 ${trainingRun.currentRound}/${trainingRun.maxRounds} 轮 · 目标 ${trainingRun.targetScore} 分`}
+                style={{ marginBottom: 12 }}
+              />
+            )}
             <Space wrap>
               {selectedQuestion.domainTags.map((domain) => (
                 <Tag color="cyan" key={domain}>{domainLabel[domain]}</Tag>
@@ -191,22 +286,30 @@ export function TrainingPanel({ sessionId, questions, domainLabel, onSessionUpda
         <Card className="panel-card training-card" title="回答训练">
           <Input.TextArea
             value={answer}
-            onChange={(event) => setAnswer(event.target.value)}
+            onChange={(event) => {
+              setAnswer(event.target.value);
+              submissionKeyRef.current = undefined;
+            }}
             placeholder="写一版你的真实回答，尽量包含背景、问题、方案、结果和复盘。"
             rows={7}
           />
           <div className="answer-actions">
             <Button onClick={handleFollowUp} loading={followUpLoading}>
-              生成追问
+              ① 生成追问
             </Button>
             <Button onClick={handleOptimize} loading={optimizationLoading}>
-              优化回答
+              ② 优化回答
             </Button>
             <Button onClick={handleReflect} loading={reflectionLoading}>
-              二次检查
+              ③ 二次检查
             </Button>
-            <Button type="primary" onClick={handleEvaluate} loading={evaluationLoading}>
-              评分并记录
+            <Button
+              type="primary"
+              onClick={handleEvaluate}
+              loading={evaluationLoading}
+              disabled={runLoading || trainingRun?.stage === "completed" || (scoredAnswer === answer && answer.trim().length > 0)}
+            >
+              {scoredAnswer === answer && answer.trim().length > 0 ? "已记录（修改回答后可重评）" : "④ 评分并记录"}
             </Button>
           </div>
 
@@ -235,6 +338,29 @@ export function TrainingPanel({ sessionId, questions, domainLabel, onSessionUpda
                     <strong>{item.question}</strong>
                     <span>{item.reason}</span>
                     <Tag>{item.focus}</Tag>
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        setQuestionOverride({
+                          question: item.question,
+                          type: selectedQuestion.type,
+                          domainTags: selectedQuestion.domainTags,
+                          tags: [item.focus],
+                          difficulty: selectedQuestion.difficulty,
+                          expectedPoints: [],
+                          sourceReason: "来自上一轮追问"
+                        });
+                        setAnswer("");
+                        setFollowUpResult(undefined);
+                        setEvaluation(undefined);
+                        setMemory(undefined);
+                        setOptimization(undefined);
+                        setReflection(undefined);
+                        setScoredAnswer(undefined);
+                      }}
+                    >
+                      回答这道追问
+                    </Button>
                   </div>
                 ))}
               </div>

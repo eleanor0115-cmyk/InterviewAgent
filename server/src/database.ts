@@ -55,8 +55,44 @@ function createSchema(db: Database) {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS training_runs (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      base_question_key TEXT NOT NULL,
+      data TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(session_id, base_question_key)
+    );
+
+    CREATE TABLE IF NOT EXISTS training_submissions (
+      idempotency_key TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      response TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_traces (
+      id TEXT PRIMARY KEY,
+      trace_id TEXT NOT NULL,
+      agent_name TEXT NOT NULL,
+      schema_version TEXT NOT NULL,
+      model TEXT NOT NULL,
+      duration_ms INTEGER NOT NULL,
+      retry_count INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      error_type TEXT,
+      error_message TEXT,
+      created_at TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_rag_documents_kind ON rag_documents(kind);
     CREATE INDEX IF NOT EXISTS idx_rag_documents_source ON rag_documents(source_id);
+    CREATE INDEX IF NOT EXISTS idx_training_runs_session ON training_runs(session_id);
+    CREATE INDEX IF NOT EXISTS idx_agent_traces_trace ON agent_traces(trace_id);
   `);
 }
 

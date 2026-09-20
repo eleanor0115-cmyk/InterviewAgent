@@ -12,7 +12,7 @@ import {
   questionTypeValues
 } from "./agentValidation.js";
 import { experienceAgentSchema } from "./agentSchemas.js";
-import { createStructuredChatCompletion, extractJsonObject } from "./llmClient.js";
+import { executeStructuredAgent } from "./agentExecutor.js";
 
 type ExperienceAnalyzerInput = {
   company: string;
@@ -124,13 +124,13 @@ function normalizeExperienceAnalysis(value: unknown): ExperienceAnalysis {
 }
 
 export async function analyzeExperience(input: ExperienceAnalyzerInput): Promise<ExperienceAnalysis> {
-  const raw = await createStructuredChatCompletion(
-    [
+  return executeStructuredAgent({
+    agentName: "experience_analyzer",
+    schema: experienceAgentSchema,
+    messages: [
     { role: "system", content: systemPrompt },
     { role: "user", content: buildUserPrompt(input) }
     ],
-    experienceAgentSchema
-  );
-
-  return normalizeExperienceAnalysis(extractJsonObject(raw));
+    normalize: normalizeExperienceAnalysis
+  });
 }

@@ -88,23 +88,24 @@ export function PlanPage() {
 
     setRefreshing(true);
     try {
-      const result = await analyzeProfile({
-        sessionId: session.id,
-        company: session.company,
-        jobTitle: session.jobTitle,
-        jdText: session.jdText,
-        resumeText: session.resumeText
-      });
+      const [result, experienceResult] = await Promise.all([
+        analyzeProfile({
+          sessionId: session.id,
+          company: session.company,
+          jobTitle: session.jobTitle,
+          jdText: session.jdText,
+          resumeText: session.resumeText
+        }),
+        analyzeExperience({
+          sessionId: session.id,
+          company: session.company,
+          jobTitle: session.jobTitle,
+          experienceText: session.experienceText,
+          jdText: session.jdText,
+          resumeText: session.resumeText
+        })
+      ]);
       setProfileResult(result);
-
-      const experienceResult = await analyzeExperience({
-        sessionId: session.id,
-        company: session.company,
-        jobTitle: session.jobTitle,
-        experienceText: session.experienceText,
-        jdText: session.jdText,
-        resumeText: session.resumeText
-      });
       setExperienceResult(experienceResult);
 
       const plannerResult = await createPlan({ sessionId: session.id });
@@ -392,6 +393,10 @@ export function PlanPage() {
                               </Space>
                               <strong>{item.title}</strong>
                               <span>{item.reason}</span>
+                              {item.source && <span>来源：{item.source}</span>}
+                              {item.matchedTerms && item.matchedTerms.length > 0 && (
+                                <Space wrap>{item.matchedTerms.slice(0, 6).map((term) => <Tag key={term}>{term}</Tag>)}</Space>
+                              )}
                             </div>
                           </List.Item>
                         )}

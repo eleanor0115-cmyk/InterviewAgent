@@ -9,7 +9,7 @@ import {
   unwrapPayload
 } from "./agentValidation.js";
 import { evaluationAgentSchema } from "./agentSchemas.js";
-import { createStructuredChatCompletion, extractJsonObject } from "./llmClient.js";
+import { executeStructuredAgent } from "./agentExecutor.js";
 
 type EvaluationInput = Pick<InterviewQuestion, "question" | "expectedPoints" | "tags"> & {
   answer: string;
@@ -87,13 +87,13 @@ function normalizeEvaluation(value: unknown): EvaluationResult {
 }
 
 export async function evaluateAnswer(input: EvaluationInput): Promise<EvaluationResult> {
-  const raw = await createStructuredChatCompletion(
-    [
+  return executeStructuredAgent({
+    agentName: "evaluation",
+    schema: evaluationAgentSchema,
+    messages: [
     { role: "system", content: systemPrompt },
     { role: "user", content: buildUserPrompt(input) }
     ],
-    evaluationAgentSchema
-  );
-
-  return normalizeEvaluation(extractJsonObject(raw));
+    normalize: normalizeEvaluation
+  });
 }

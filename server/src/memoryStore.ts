@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { EvaluationResult, MemoryProfile } from "../../src/shared/types.js";
+import type { EvaluationResult, KnowledgeMastery, MemoryProfile } from "../../src/shared/types.js";
 import { getDatabase, readJsonColumn, writeDatabase } from "./database.js";
 import { serverDataDir } from "./paths.js";
 
@@ -12,6 +12,7 @@ function emptyMemory(candidateId = defaultCandidateId): MemoryProfile {
     candidateId,
     weakTags: [],
     strongTags: [],
+    knowledgeMastery: [],
     updatedAt: new Date().toISOString(),
     history: []
   };
@@ -50,21 +51,52 @@ async function ensureMigrated() {
 export async function getMemoryProfile(candidateId = defaultCandidateId): Promise<MemoryProfile> {
   await ensureMigrated();
   const db = await getDatabase();
-  return (
+  const memory = (
     readJsonColumn<MemoryProfile>(db, "SELECT data FROM memory_profiles WHERE candidate_id = ?", [candidateId])[0] ??
     emptyMemory(candidateId)
   );
+  return { ...memory, knowledgeMastery: memory.knowledgeMastery ?? [] };
 }
 
-export async function updateMemoryProfile(input: {
+function updateKnowledgeMastery(
+  existing: KnowledgeMastery[],
+  tags: string[],
+  score: number,
+  practicedAt: string
+) {
+  const byTag = new Map(existing.map((item) => [item.knowledgePoint, item]));
+
+  for (const tag of new Set(tags.filter(Boolean))) {
+    const current = byTag.get(tag);
+    const attempts = (current?.attempts ?? 0) + 1;
+    const averageScore = current
+      ? (current.averageScore * current.attempts + score) / attempts
+      : score;
+    byTag.set(tag, {
+      knowledgePoint: tag,
+      attempts,
+      latestScore: score,
+      averageScore: Math.round(averageScore * 10) / 10,
+      bestScore: Math.max(current?.bestScore ?? 0, score),
+      lastPracticedAt: practicedAt
+    });
+  }
+
+  return [...byTag.values()]
+    .sort((left, right) => right.lastPracticedAt.localeCompare(left.lastPracticedAt))
+    .slice(0, 50);
+}
+
+export function buildUpdatedMemory(input: {
+  memory: MemoryProfile;
   question: string;
   tags: string[];
   evaluation: EvaluationResult;
-  candidateId?: string;
+  practicedAt?: string;
 }) {
-  const memory = await getMemoryProfile(input.candidateId);
-  const weakTags = new Set(memory.weakTags);
-  const strongTags = new Set(memory.strongTags);
+  const practicedAt = input.practicedAt ?? new Date().toISOString();
+  const weakTags = new Set(input.memory.weakTags);
+  const strongTags = new Set(input.memory.strongTags);
 
   for (const update of input.evaluation.memoryUpdates) {
     if (update.level === "weak") {
@@ -78,22 +110,38 @@ export async function updateMemoryProfile(input: {
     }
   }
 
-  const next: MemoryProfile = {
-    ...memory,
+  return {
+    ...input.memory,
     weakTags: [...weakTags].slice(0, 20),
     strongTags: [...strongTags].slice(0, 20),
-    updatedAt: new Date().toISOString(),
+    knowledgeMastery: updateKnowledgeMastery(
+      input.memory.knowledgeMastery ?? [],
+      input.tags,
+      input.evaluation.score,
+      practicedAt
+    ),
+    updatedAt: practicedAt,
     history: [
       {
         question: input.question,
         score: input.evaluation.score,
         tags: input.tags,
         weaknesses: input.evaluation.weaknesses,
-        createdAt: new Date().toISOString()
+        createdAt: practicedAt
       },
-      ...memory.history
+      ...input.memory.history
     ].slice(0, 30)
-  };
+  } satisfies MemoryProfile;
+}
+
+export async function updateMemoryProfile(input: {
+  question: string;
+  tags: string[];
+  evaluation: EvaluationResult;
+  candidateId?: string;
+}) {
+  const memory = await getMemoryProfile(input.candidateId);
+  const next = buildUpdatedMemory({ ...input, memory });
 
   await writeDatabase((db) => {
     db.run("INSERT OR REPLACE INTO memory_profiles (candidate_id, data, updated_at) VALUES (?, ?, ?)", [

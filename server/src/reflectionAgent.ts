@@ -10,7 +10,7 @@ import {
   unwrapPayload
 } from "./agentValidation.js";
 import { reflectionAgentSchema } from "./agentSchemas.js";
-import { createStructuredChatCompletion, extractJsonObject } from "./llmClient.js";
+import { executeStructuredAgent } from "./agentExecutor.js";
 
 type ReflectionInput = {
   question: string;
@@ -105,13 +105,13 @@ function normalizeReflection(value: unknown): ReflectionResult {
 }
 
 export async function reflectInterviewResult(input: ReflectionInput): Promise<ReflectionResult> {
-  const raw = await createStructuredChatCompletion(
-    [
+  return executeStructuredAgent({
+    agentName: "reflection",
+    schema: reflectionAgentSchema,
+    messages: [
     { role: "system", content: systemPrompt },
     { role: "user", content: buildUserPrompt(input) }
     ],
-    reflectionAgentSchema
-  );
-
-  return normalizeReflection(extractJsonObject(raw));
+    normalize: normalizeReflection
+  });
 }

@@ -1,7 +1,7 @@
 import type { FollowUpResult, InterviewQuestion, QuestionType } from "../../src/shared/types.js";
 import { asArray, asNumber, asRecord, asString, unwrapPayload } from "./agentValidation.js";
 import { followUpAgentSchema } from "./agentSchemas.js";
-import { createStructuredChatCompletion, extractJsonObject } from "./llmClient.js";
+import { executeStructuredAgent } from "./agentExecutor.js";
 
 type FollowUpInput = Pick<InterviewQuestion, "question" | "expectedPoints" | "tags"> & {
   answer: string;
@@ -62,13 +62,13 @@ function normalizeFollowUpResult(value: unknown, requestedDepth?: number): Follo
 }
 
 export async function generateFollowUps(input: FollowUpInput): Promise<FollowUpResult> {
-  const raw = await createStructuredChatCompletion(
-    [
+  return executeStructuredAgent({
+    agentName: "follow_up",
+    schema: followUpAgentSchema,
+    messages: [
     { role: "system", content: systemPrompt },
     { role: "user", content: buildUserPrompt(input) }
     ],
-    followUpAgentSchema
-  );
-
-  return normalizeFollowUpResult(extractJsonObject(raw), input.depth);
+    normalize: (value) => normalizeFollowUpResult(value, input.depth)
+  });
 }

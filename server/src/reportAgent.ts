@@ -1,7 +1,7 @@
 import type { EvaluationResult, InterviewReport, InterviewSession, MemoryProfile } from "../../src/shared/types.js";
 import { asArray, asNumber, asRecord, asString, asStringArray, unwrapPayload } from "./agentValidation.js";
 import { reportAgentSchema } from "./agentSchemas.js";
-import { createStructuredChatCompletion, extractJsonObject } from "./llmClient.js";
+import { executeStructuredAgent } from "./agentExecutor.js";
 
 const dimensionLabels: Record<keyof EvaluationResult["dimensionScores"], string> = {
   relevance: "扣题",
@@ -106,13 +106,13 @@ function normalizeReport(value: unknown, sessionId: string): InterviewReport {
 }
 
 export async function createReport(session: InterviewSession, memory?: MemoryProfile): Promise<InterviewReport> {
-  const raw = await createStructuredChatCompletion(
-    [
+  return executeStructuredAgent({
+    agentName: "report",
+    schema: reportAgentSchema,
+    messages: [
     { role: "system", content: systemPrompt },
     { role: "user", content: buildUserPrompt(session, memory) }
     ],
-    reportAgentSchema
-  );
-
-  return normalizeReport(extractJsonObject(raw), session.id);
+    normalize: (value) => normalizeReport(value, session.id)
+  });
 }

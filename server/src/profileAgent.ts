@@ -1,6 +1,7 @@
 import type { ProfileAnalysis } from "../../src/shared/types.js";
+import { executeStructuredAgent } from "./agentExecutor.js";
 import { profileAgentSchema } from "./agentSchemas.js";
-import { extractJsonObject, createStructuredChatCompletion, hasLlmConfig } from "./llmClient.js";
+import { hasLlmConfig } from "./llmClient.js";
 import { profileAnalysisSchema } from "./schemas.js";
 
 type ProfileAgentInput = {
@@ -103,15 +104,15 @@ export async function analyzeProfileWithAgent(input: ProfileAgentInput): Promise
     throw new Error("未配置 OPENAI_API_KEY，请检查后端环境变量。");
   }
 
-  const raw = await createStructuredChatCompletion(
-    [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: buildUserPrompt(input) }
+  const analysis = await executeStructuredAgent({
+    agentName: "profile_analyzer",
+    schema: profileAgentSchema,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: buildUserPrompt(input) }
     ],
-    profileAgentSchema
-  );
-  const parsed = extractJsonObject(raw);
-  const analysis = normalizeProfileAnalysis(profileAnalysisSchema.parse(parsed));
+    normalize: (value) => normalizeProfileAnalysis(profileAnalysisSchema.parse(value))
+  });
 
   return {
     analysis,

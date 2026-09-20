@@ -10,9 +10,10 @@ import {
   unwrapPayload
 } from "./agentValidation.js";
 import { ragRerankAgentSchema } from "./agentSchemas.js";
+import { executeStructuredAgent } from "./agentExecutor.js";
 import { getDatabase, readJsonColumn, writeDatabase } from "./database.js";
-import { createStructuredChatCompletion, extractJsonObject } from "./llmClient.js";
 import { defaultExperienceLibraryFile } from "./paths.js";
+import { rankDocumentsByKeywords } from "./ragRetrieval.js";
 
 export type RagDocumentKind = "interview_experience" | "training_memory";
 
@@ -35,6 +36,9 @@ export type RagHit = {
   metadata: Record<string, unknown>;
   relevance: number;
   reason: string;
+  source: string;
+  excerpt: string;
+  matchedTerms: string[];
 };
 
 let libraryMigrationPromise: Promise<void> | undefined;
@@ -275,12 +279,22 @@ export async function retrieveRagContext(input: {
   const kinds = input.kinds ?? ["interview_experience", "training_memory"];
   const topK = input.topK ?? 8;
   const allDocuments = await listRagDocuments();
-  const candidates = allDocuments.filter((document) => kinds.includes(document.kind));
+  const filteredDocuments = allDocuments.filter((document) => kinds.includes(document.kind));
+  const keywordRanked = rankDocumentsByKeywords({
+    documents: filteredDocuments,
+    query: buildRagQuery(input.session, input.memory),
+    company: input.session.company,
+    jobTitle: input.session.jobTitle,
+    limit: 24
+  });
+  const candidates = keywordRanked.map((item) => item.document);
 
   if (candidates.length === 0) return [];
 
-  const raw = await createStructuredChatCompletion(
-    [
+  const ranked = await executeStructuredAgent({
+    agentName: "rag_reranker",
+    schema: ragRerankAgentSchema,
+    messages: [
     {
       role: "system",
       content:
@@ -296,15 +310,16 @@ export async function retrieveRagContext(input: {
       })
     }
     ],
-    ragRerankAgentSchema
-  );
-  const ranked = normalizeRerankResult(extractJsonObject(raw));
+    normalize: normalizeRerankResult
+  });
   const byId = new Map(candidates.map((document) => [document.id, document]));
+  const keywordById = new Map(keywordRanked.map((item) => [item.document.id, item]));
 
   return ranked
     .map((item) => {
       const document = byId.get(item.id);
       if (!document) return undefined;
+      const keywordMatch = keywordById.get(document.id);
       return {
         id: document.id,
         kind: document.kind,
@@ -312,7 +327,10 @@ export async function retrieveRagContext(input: {
         content: document.content,
         metadata: document.metadata,
         relevance: item.relevance,
-        reason: item.reason
+        reason: item.reason,
+        source: String(document.metadata.source ?? document.sourceId ?? "本地资料"),
+        excerpt: document.content.slice(0, 240),
+        matchedTerms: keywordMatch?.matchedTerms ?? []
       };
     })
     .filter((item): item is RagHit => Boolean(item))
@@ -326,6 +344,9 @@ export function summarizeRagHits(hits: RagHit[]) {
     title: hit.title,
     relevance: hit.relevance,
     reason: hit.reason,
+    source: hit.source,
+    excerpt: hit.excerpt,
+    matchedTerms: hit.matchedTerms,
     metadata: hit.metadata,
     content: hit.content.slice(0, 1800)
   }));

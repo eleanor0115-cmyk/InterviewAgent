@@ -10,7 +10,9 @@
     "build": "tsc -b --force && vite build && tsc -b tsconfig.server.json --force",
     "preview": "vite preview --host 0.0.0.0",
     "start": "node dist/server/src/index.js",
-    "typecheck": "tsc -b"
+    "typecheck": "tsc -b",
+    "test": "tsx --test server/src/agentExecutor.test.ts server/src/workflowPolicy.test.ts server/src/memoryStore.test.ts server/src/ragRetrieval.test.ts server/src/trainingWorkflow.integration.test.ts",
+    "eval:evaluation": "tsx server/src/runEvaluationEval.ts"
   },
   "dependencies": {
     "@ant-design/icons": "^5.6.1",
