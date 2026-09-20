@@ -4,7 +4,16 @@ import { defineConfig } from "vite";
 export default defineConfig({
   plugins: [react()],
   build: {
-    outDir: "dist/client"
+    outDir: "dist/client",
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          react: ["react", "react-dom", "react-router-dom"],
+          antd: ["antd", "@ant-design/icons"],
+          echarts: ["echarts"]
+        }
+      }
+    }
   },
   server: {
     port: 5174,
